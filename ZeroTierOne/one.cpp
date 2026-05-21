@@ -76,6 +76,7 @@
 #include "osdep/OSUtils.hpp"
 #include "osdep/Thread.hpp"
 #include "service/OneService.hpp"
+#include "service/ZtRouteDebug.hpp"
 #include "version.h"
 
 #include <algorithm>
@@ -1365,6 +1366,103 @@ static int cli(int argc, char** argv)
 #endif
 
 		// fprintf(stderr, "%s\n", dump.str().c_str());
+	}
+	else if (command == "dumpmanagedroute") {
+		// zerotier-cli dumpmanagedroute <nwid> <ipv4> <marker>
+		// marker may be numeric (e.g. 2) or name (e.g. BEFORE_FIRST_PING)
+		// Re-scan argv: the generic parser only captures 3 slots (command, arg1, arg2);
+		// a 4th positional overwrites arg2. Collect all non-flag args from argv directly.
+		std::vector<std::string> posArgs;
+		for (int i = 1; i < argc; ++i) {
+			if (argv[i][0] != '-')
+				posArgs.push_back(argv[i]);
+		}
+		// posArgs[0]=command [1]=nwid [2]=ipv4 [3]=marker
+		if (posArgs.size() < 4) {
+			fprintf(stderr, "Usage: zerotier-cli dumpmanagedroute <nwid> <ipv4> <marker>" ZT_EOL_S);
+			fprintf(stderr, "  marker: 1=AFTER_NETWORK_CONFIG_OK 2=BEFORE_FIRST_PING 3=AFTER_FIRST_PING_FAIL" ZT_EOL_S);
+			fprintf(stderr, "          4=AFTER_PEER_VISIBLE 5=AFTER_SUCCESSFUL_PING" ZT_EOL_S);
+			fprintf(stderr, "          10=QEMU_AFTER_NETIF_UP 11=QEMU_ON_NO_PEER 12=QEMU_ON_NO_PATH 13=QEMU_ON_DROP" ZT_EOL_S);
+			fprintf(stderr, "          99=MANUAL_GDB_TRIGGER" ZT_EOL_S);
+			return 2;
+		}
+		const std::string& nwidStr   = posArgs[1];
+		const std::string& ipStr     = posArgs[2];
+		const std::string& markerStr = posArgs[3];
+		int marker_id = ZtRouteDebugMarkerResolve(markerStr.c_str());
+		if (marker_id < 0) {
+			fprintf(stderr, "Unknown marker: %s" ZT_EOL_S, markerStr.c_str());
+			return 2;
+		}
+		char urlBuf[256];
+		OSUtils::ztsnprintf(urlBuf, sizeof(urlBuf),
+			"/debug/routedecision/%s/%s/%d",
+			nwidStr.c_str(), ipStr.c_str(), marker_id);
+		const unsigned int scode = Http::GET(1024 * 1024 * 16, 60000, (const struct sockaddr*)&addr, urlBuf, requestHeaders, responseHeaders, responseBody);
+		if (scode == 0) {
+			printf("Error connecting to the ZeroTier service: %s\n\nPlease check that the service is running and that TCP port 9993 can be contacted via 127.0.0.1." ZT_EOL_S, responseBody.c_str());
+			return 1;
+		}
+		if (scode == 200) {
+			printf("%s", responseBody.c_str());
+			return 0;
+		}
+		printf("%u dumpmanagedroute %s" ZT_EOL_S, scode, responseBody.c_str());
+		return 1;
+	}
+	else if (command == "debugegress") {
+		// zerotier-cli debugegress <nwid> <ipv4> <marker> <seconds>
+		// Enables egress-frame tracing for <seconds> seconds, then retrieves the log.
+		std::vector<std::string> posArgs;
+		for (int i = 1; i < argc; ++i) {
+			if (argv[i][0] != '-')
+				posArgs.push_back(argv[i]);
+		}
+		// posArgs[0]=command [1]=nwid [2]=ipv4 [3]=marker [4]=seconds
+		if (posArgs.size() < 5) {
+			fprintf(stderr, "Usage: zerotier-cli debugegress <nwid> <ipv4> <marker> <seconds>" ZT_EOL_S);
+			fprintf(stderr, "  Enable egress frame trace for <seconds> seconds then print log." ZT_EOL_S);
+			fprintf(stderr, "  marker: 20=EGRESS_ARP_BEFORE_PEER 22=EGRESS_IPV4_ICMP_BEFORE_PEER" ZT_EOL_S);
+			fprintf(stderr, "          24=EGRESS_FRAME_DROPPED 25=EGRESS_FRAME_SENT" ZT_EOL_S);
+			return 2;
+		}
+		const std::string& nwidStr   = posArgs[1];
+		const std::string& ipStr     = posArgs[2];
+		const std::string& markerStr = posArgs[3];
+		const std::string& secsStr   = posArgs[4];
+		int marker_id = ZtRouteDebugMarkerResolve(markerStr.c_str());
+		if (marker_id < 0) {
+			fprintf(stderr, "Unknown marker: %s" ZT_EOL_S, markerStr.c_str());
+			return 2;
+		}
+		// Enable trace via POST
+		char urlBuf[256];
+		OSUtils::ztsnprintf(urlBuf, sizeof(urlBuf),
+			"/debug/egresstrace/%s/%s/%d/%s",
+			nwidStr.c_str(), ipStr.c_str(), marker_id, secsStr.c_str());
+		unsigned int scode = Http::POST(1024 * 1024 * 16, 60000, (const struct sockaddr*)&addr, urlBuf, requestHeaders, "{}", 2, responseHeaders, responseBody);
+		if (scode == 0) {
+			printf("Error connecting to the ZeroTier service." ZT_EOL_S);
+			return 1;
+		}
+		printf("Trace enabled: %s", responseBody.c_str());
+		// Wait for trace to complete
+		int secs = std::stoi(secsStr);
+		if (secs > 0 && secs <= 120) {
+			fprintf(stderr, "Waiting %d second(s) for trace..." ZT_EOL_S, secs);
+			::sleep((unsigned int)secs);
+		}
+		// Stop trace
+		Http::POST(1024 * 1024 * 16, 5000, (const struct sockaddr*)&addr, "/debug/egresstrace/stop", requestHeaders, "{}", 2, responseHeaders, responseBody);
+		// Retrieve log
+		responseBody.clear();
+		scode = Http::GET(1024 * 1024 * 16, 10000, (const struct sockaddr*)&addr, "/debug/egresstrace/log", requestHeaders, responseHeaders, responseBody);
+		if (scode == 200) {
+			printf("%s", responseBody.c_str());
+			return 0;
+		}
+		printf("%u debugegress log retrieval: %s" ZT_EOL_S, scode, responseBody.c_str());
+		return 1;
 	}
 	else {
 		cliPrintHelp(argv[0], stderr);

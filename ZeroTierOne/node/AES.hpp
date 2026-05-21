@@ -11,6 +11,15 @@
 
 #include "Constants.hpp"
 #include "Utils.hpp"
+#ifdef ZT_ESP32_STEP41_DEBUG_GMACSIV
+#include <stdio.h>
+#endif
+#ifndef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+#define ZT_ESP32_STEP47_DEARMOR_DIVERGENCE 1
+#endif
+#ifndef ZT_ESP32_STEP49_GMAC_TRACE
+#define ZT_ESP32_STEP49_GMAC_TRACE 1
+#endif
 
 // Uncomment to disable all hardware acceleration (usually for testing)
 // #define ZT_AES_NO_ACCEL
@@ -25,8 +34,18 @@
 #ifndef ZT_INLINE
 #define ZT_INLINE inline
 #endif
+#ifndef ZT_ESP32_STEP41_DEBUG_GMACSIV
+#define ZT_ESP32_STEP41_DEBUG_GMACSIV 1
+#endif
 
 namespace ZeroTier {
+
+#ifdef ZT_ESP32_STEP41_DEBUG_GMACSIV
+static volatile const void* ZT_STEP41_DEBUG_TARGET_DEC = (const void*)0;
+#endif
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+static volatile unsigned int ZT_STEP47_DEBUG_MODE = 0; // 1=live,2=iso
+#endif
 
 /**
  * AES-256 and pals including GMAC, CTR, etc.
@@ -223,6 +242,15 @@ class AES {
 		 * @param tag 128-bit GMAC tag (can be truncated)
 		 */
 		void finish(uint8_t tag[16]) noexcept;
+
+#ifdef ZT_ESP32_STEP49_GMAC_TRACE
+		ZT_INLINE const uint8_t* ztStep49DebugIv() const noexcept { return _iv; }
+		ZT_INLINE const uint8_t* ztStep49DebugRemainder() const noexcept { return _r; }
+		ZT_INLINE unsigned int ztStep49DebugRemainderPos() const noexcept { return _rp; }
+		ZT_INLINE unsigned int ztStep49DebugTotalLen() const noexcept { return _len; }
+		ZT_INLINE uint64_t ztStep49DebugY0() const noexcept { return _y[0]; }
+		ZT_INLINE uint64_t ztStep49DebugY1() const noexcept { return _y[1]; }
+#endif
 
 	  private:
 #ifdef ZT_AES_AESNI
@@ -523,15 +551,101 @@ class AES {
 		 *
 		 * @return True if resulting plaintext (and AAD) pass message authentication check
 		 */
-		ZT_INLINE bool finish() noexcept
-		{
-			_ctr.finish();
+			ZT_INLINE bool finish() noexcept
+			{
+				_ctr.finish();
 
-			uint64_t gmacTag[2];
-			_gmac.update(_output, _decryptedLen);
-			_gmac.finish(reinterpret_cast<uint8_t*>(gmacTag));
-			return (gmacTag[0] ^ gmacTag[1]) == _ivMac[1];
-		}
+				uint64_t gmacTag[2];
+				_gmac.update(_output, _decryptedLen);
+				_gmac.finish(reinterpret_cast<uint8_t*>(gmacTag));
+				const uint64_t gmacXor = (gmacTag[0] ^ gmacTag[1]);
+				const bool match = (gmacXor == _ivMac[1]);
+#ifdef ZT_ESP32_STEP41_DEBUG_GMACSIV
+				if (ZT_STEP41_DEBUG_TARGET_DEC == this) {
+					printf("[ZT_STEP41] finish this=%p output=%p decLen=%u ivMac0=%016llx ivMac1=%016llx g0=%016llx g1=%016llx xor=%016llx match=%u\n",
+						   (void*)this,
+						   _output,
+						   (unsigned int)_decryptedLen,
+						   (unsigned long long)_ivMac[0],
+						   (unsigned long long)_ivMac[1],
+						   (unsigned long long)gmacTag[0],
+						   (unsigned long long)gmacTag[1],
+						   (unsigned long long)gmacXor,
+						   (unsigned int)(match ? 1U : 0U));
+				}
+#endif
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+				if (ZT_STEP47_DEBUG_MODE == 1U) {
+					printf("[ZT_STEP47_LIVE] phase=finish_values this=%p out=%p decLen=%u ivMac0=%016llx ivMac1=%016llx g0=%016llx g1=%016llx xor=%016llx match=%u\n",
+						   (void*)this,
+						   _output,
+						   (unsigned int)_decryptedLen,
+						   (unsigned long long)_ivMac[0],
+						   (unsigned long long)_ivMac[1],
+						   (unsigned long long)gmacTag[0],
+						   (unsigned long long)gmacTag[1],
+						   (unsigned long long)gmacXor,
+						   (unsigned int)(match ? 1U : 0U));
+				}
+				else if (ZT_STEP47_DEBUG_MODE == 2U) {
+					printf("[ZT_STEP47_ISO] phase=finish_values this=%p out=%p decLen=%u ivMac0=%016llx ivMac1=%016llx g0=%016llx g1=%016llx xor=%016llx match=%u\n",
+						   (void*)this,
+						   _output,
+						   (unsigned int)_decryptedLen,
+						   (unsigned long long)_ivMac[0],
+						   (unsigned long long)_ivMac[1],
+						   (unsigned long long)gmacTag[0],
+						   (unsigned long long)gmacTag[1],
+						   (unsigned long long)gmacXor,
+						   (unsigned int)(match ? 1U : 0U));
+				}
+#endif
+				return match;
+			}
+
+#ifdef ZT_ESP32_STEP41_DEBUG_GMACSIV
+			ZT_INLINE void ztStep41DebugSetTarget() noexcept
+			{
+				ZT_STEP41_DEBUG_TARGET_DEC = this;
+			}
+
+			ZT_INLINE static void ztStep41DebugClearTarget() noexcept
+			{
+				ZT_STEP41_DEBUG_TARGET_DEC = (const void*)0;
+			}
+
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+			ZT_INLINE static void ztStep47DebugSetMode(const unsigned int m) noexcept
+			{
+				ZT_STEP47_DEBUG_MODE = m;
+			}
+#endif
+
+			ZT_INLINE bool ztStep41DebugIsTarget() const noexcept
+			{
+				return (ZT_STEP41_DEBUG_TARGET_DEC == this);
+			}
+
+			ZT_INLINE const void* ztStep41DebugOutput() const noexcept
+			{
+				return _output;
+			}
+
+			ZT_INLINE unsigned int ztStep41DebugDecryptedLen() const noexcept
+			{
+				return _decryptedLen;
+			}
+
+			ZT_INLINE uint64_t ztStep41DebugIvMac0() const noexcept
+			{
+				return _ivMac[0];
+			}
+
+			ZT_INLINE uint64_t ztStep41DebugIvMac1() const noexcept
+			{
+				return _ivMac[1];
+			}
+#endif
 
 	  private:
 		uint64_t _ivMac[2];

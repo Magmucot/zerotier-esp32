@@ -4,21 +4,67 @@ services:
       context: .
       dockerfile: Dockerfile.dev
     image: zt-esp32-dev:latest
+    init: true
     container_name: zt-dev
+    hostname: zt-dev
     restart: unless-stopped
+
+    environment:
+      CHECK_ESP_IDF_TOOLS: "0"
+      INSTALL_CLI_IF_MISSING: "0"
+      INSTALL_MISSING_ESP_IDF_TOOLS: "0"
+
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
     volumes:
       - .:/project
-      - idf-tools-v53:/root/.espressif
-      - /root/.claude:/root/.claude
-      - /root/.claude.json:/root/.claude.json
+      - /opt/stacks/zt-esp32-home/root:/root
       - /opt/stacks/zt-esp32-qemu:/qemu-project
+
     working_dir: /project
+    entrypoint: ["/project/docker-entrypoint.dev.sh"]
+    command: ["sleep", "infinity"]
+
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
+      - NET_RAW
+      - SYS_PTRACE
+
+    security_opt:
+      - seccomp:unconfined
+
     devices:
       - /dev/net/tun:/dev/net/tun
 
-volumes:
-  idf-tools-v53:
-    external: true
+    networks:
+      default: {}
+      lan100:
+        ipv4_address: 192.168.100.251
+      qemu-lan: {}
+
+
+networks:
+  default:
+    driver: bridge
+
+  lan100:
+    driver: macvlan
+    driver_opts:
+      parent: eth0
+    ipam:
+      config:
+        - subnet: 192.168.100.0/24
+          gateway: 192.168.100.254
+
+  qemu-lan:
+    driver: macvlan
+    driver_opts:
+      parent: eth2
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+          gateway: 172.21.0.1

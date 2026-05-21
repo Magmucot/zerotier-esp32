@@ -12,6 +12,11 @@
 
 #include <algorithm>
 #include <stdint.h>
+#include <stdio.h>
+
+#ifndef ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE
+#define ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE 1
+#endif
 
 namespace ZeroTier {
 
@@ -47,6 +52,9 @@ NetworkConfig::NetworkConfig()
 	, ssoState()
 	, ssoClientID()
 {
+#ifdef ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE
+	printf("[ZT_STEP54] point=constructor_enter this=%p sizeofNetworkConfig=%u\n", (void*)this, (unsigned int)sizeof(NetworkConfig));
+#endif
 	name[0] = 0;
 	memset(specialists, 0, sizeof(uint64_t) * ZT_MAX_NETWORK_SPECIALISTS);
 	memset(routes, 0, sizeof(ZT_VirtualNetworkRoute) * ZT_MAX_NETWORK_ROUTES);
@@ -61,6 +69,9 @@ NetworkConfig::NetworkConfig()
 	memset(ssoClientID, 0, sizeof(ssoClientID));
 	strncpy(ssoProvider, "default", sizeof(ssoProvider));
 	ssoProvider[sizeof(ssoProvider) - 1] = 0;
+#ifdef ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE
+	printf("[ZT_STEP54] point=constructor_exit this=%p\n", (void*)this);
+#endif
 }
 
 bool NetworkConfig::toDictionary(Dictionary<ZT_NETWORKCONFIG_DICT_CAPACITY>& d, bool includeLegacy) const

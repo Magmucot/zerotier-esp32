@@ -196,17 +196,20 @@ void AES::GMAC::finish(uint8_t tag[16]) noexcept
 	y0 ^= Utils::hton((uint64_t)_len << 3U);
 	s_gfmul(h0, h1, y0, y1);
 
-	uint64_t iv2[2];
+	// Keep the final counter block in a byte buffer to avoid aliasing- and
+	// endianness-sensitive reinterpret casts between uint8_t* and uint64_t*.
+	uint8_t iv2[16];
 	Utils::copy<12>(iv2, _iv);
-#if __BYTE_ORDER == __BIG_ENDIAN
-	reinterpret_cast<uint32_t*>(iv2)[3] = 0x00000001;
-#else
-	reinterpret_cast<uint32_t*>(iv2)[3] = 0x01000000;
-#endif
+	iv2[12] = 0;
+	iv2[13] = 0;
+	iv2[14] = 0;
+	iv2[15] = 1;
 	_aes.encrypt(iv2, iv2);
+	const uint64_t e0 = Utils::loadMachineEndian<uint64_t>(iv2);
+	const uint64_t e1 = Utils::loadMachineEndian<uint64_t>(iv2 + 8);
 
-	Utils::storeMachineEndian<uint64_t>(tag, iv2[0] ^ y0);
-	Utils::storeMachineEndian<uint64_t>(tag + 8, iv2[1] ^ y1);
+	Utils::storeMachineEndian<uint64_t>(tag, e0 ^ y0);
+	Utils::storeMachineEndian<uint64_t>(tag + 8, e1 ^ y1);
 }
 
 // AES-CTR ------------------------------------------------------------------------------------------------------------

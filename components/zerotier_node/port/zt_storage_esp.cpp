@@ -34,6 +34,13 @@ extern "C" void zt_state_put_impl(ZT_Node *node, void *uptr, void *tptr,
         }
         return;
     }
+    // cc-step123b Phase 5: [ZT_NETCONF_SIZE] — measure actual serialized dict size.
+    // type==6 is ZT_STATE_OBJECT_NETWORK_CONFIG. This directly answers whether
+    // ZT_NETWORKCONFIG_DICT_CAPACITY_OVERRIDE can safely be reduced from 4096 to 2048.
+    if (type == 6) {
+        ESP_LOGI(TAG, "[ZT_NETCONF_SIZE] type=NETWORK_CONFIG len=%d", len);
+    }
+
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
     char key[16];

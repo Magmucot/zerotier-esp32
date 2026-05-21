@@ -20,10 +20,29 @@
 #include "Switch.hpp"
 #include "Trace.hpp"
 #include "Utils.hpp"
+#include <stdio.h>
+#ifndef ZT_ESP32_STEP45_DEBUG_KEYS
+#define ZT_ESP32_STEP45_DEBUG_KEYS 1
+#endif
+#ifndef ZT_ESP32_STEP46_CAPTURE_REAL_PACKET
+#define ZT_ESP32_STEP46_CAPTURE_REAL_PACKET 1
+#endif
 
 namespace ZeroTier {
 
 static unsigned char s_freeRandomByteCounter = 0;
+#ifdef ZT_ESP32_STEP45_DEBUG_KEYS
+static uint64_t ztStep45Fingerprint(const void* p, unsigned int len)
+{
+	const uint8_t* b = reinterpret_cast<const uint8_t*>(p);
+	uint64_t h = 1469598103934665603ULL;
+	for (unsigned int i = 0; i < len; ++i) {
+		h ^= (uint64_t)b[i];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+#endif
 
 Peer::Peer(const RuntimeEnvironment* renv, const Identity& myIdentity, const Identity& peerIdentity)
 	: RR(renv)
@@ -64,8 +83,47 @@ Peer::Peer(const RuntimeEnvironment* renv, const Identity& myIdentity, const Ide
 	uint8_t ktmp[ZT_SYMMETRIC_KEY_SIZE];
 	KBKDFHMACSHA384(_key, ZT_KBKDF_LABEL_AES_GMAC_SIV_K0, 0, 0, ktmp);
 	_aesKeys[0].init(ktmp);
+#ifdef ZT_ESP32_STEP45_DEBUG_KEYS
+	uint64_t k0fp = ztStep45Fingerprint(ktmp, ZT_SYMMETRIC_KEY_SIZE);
+#ifdef ZT_ESP32_STEP46_CAPTURE_REAL_PACKET
+	if (peerIdentity.address().toInt() == 0xdb64858fedULL) {
+		printf("[ZT_STEP46_K0_DERIVED] hex=");
+		for (unsigned int i = 0; i < ZT_SYMMETRIC_KEY_SIZE; ++i) {
+			printf("%02x", ktmp[i]);
+		}
+		printf("\n");
+	}
+#endif
+#endif
 	KBKDFHMACSHA384(_key, ZT_KBKDF_LABEL_AES_GMAC_SIV_K1, 0, 0, ktmp);
 	_aesKeys[1].init(ktmp);
+#ifdef ZT_ESP32_STEP45_DEBUG_KEYS
+	uint64_t k1fp = ztStep45Fingerprint(ktmp, ZT_SYMMETRIC_KEY_SIZE);
+#ifdef ZT_ESP32_STEP46_CAPTURE_REAL_PACKET
+	if (peerIdentity.address().toInt() == 0xdb64858fedULL) {
+		printf("[ZT_STEP46_K1_DERIVED] hex=");
+		for (unsigned int i = 0; i < ZT_SYMMETRIC_KEY_SIZE; ++i) {
+			printf("%02x", ktmp[i]);
+		}
+		printf("\n");
+	}
+#endif
+	if (peerIdentity.address().toInt() == 0xdb64858fedULL) {
+		printf("[ZT_STEP45] peer_ctor this=%p peer=0x%llx my=0x%llx keyFp=%016llx key16=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x k0fp=%016llx k1fp=%016llx aes0ptr=%p aes1ptr=%p aes0fp=%016llx aes1fp=%016llx\n",
+		       (void*)this,
+		       (unsigned long long)peerIdentity.address().toInt(),
+		       (unsigned long long)myIdentity.address().toInt(),
+		       (unsigned long long)ztStep45Fingerprint(_key, ZT_SYMMETRIC_KEY_SIZE),
+		       _key[0], _key[1], _key[2], _key[3], _key[4], _key[5], _key[6], _key[7],
+		       _key[8], _key[9], _key[10], _key[11], _key[12], _key[13], _key[14], _key[15],
+		       (unsigned long long)k0fp,
+		       (unsigned long long)k1fp,
+		       (void*)&_aesKeys[0],
+		       (void*)&_aesKeys[1],
+		       (unsigned long long)ztStep45Fingerprint(&_aesKeys[0], sizeof(AES)),
+		       (unsigned long long)ztStep45Fingerprint(&_aesKeys[1], sizeof(AES)));
+	}
+#endif
 	Utils::burn(ktmp, ZT_SYMMETRIC_KEY_SIZE);
 }
 

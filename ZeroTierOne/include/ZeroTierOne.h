@@ -96,9 +96,7 @@ extern "C" {
  * real world throughput at all vs the previous default of 1444.
  */
 #ifndef ZT_DEFAULT_PHYSMTU
-#ifndef ZT_DEFAULT_PHYSMTU
 #define ZT_DEFAULT_PHYSMTU 1432
-#endif
 #endif
 
 /**
@@ -129,22 +127,30 @@ extern "C" {
 /**
  * Maximum number of pushed routes on a network
  */
+#ifndef ZT_MAX_NETWORK_ROUTES
 #define ZT_MAX_NETWORK_ROUTES 128
+#endif
 
 /**
  * Maximum number of statically assigned IP addresses per network endpoint using ZT address management (not DHCP)
  */
+#ifndef ZT_MAX_ZT_ASSIGNED_ADDRESSES
 #define ZT_MAX_ZT_ASSIGNED_ADDRESSES 32
+#endif
 
 /**
  * Maximum number of "specialists" on a network -- bridges, relays, etc.
  */
+#ifndef ZT_MAX_NETWORK_SPECIALISTS
 #define ZT_MAX_NETWORK_SPECIALISTS 256
+#endif
 
 /**
  * Maximum number of multicast group subscriptions per network
  */
+#ifndef ZT_MAX_NETWORK_MULTICAST_SUBSCRIPTIONS
 #define ZT_MAX_NETWORK_MULTICAST_SUBSCRIPTIONS 4096
+#endif
 
 /**
  * Rules engine revision ID, which specifies rules engine capabilities
@@ -182,7 +188,9 @@ extern "C" {
 /**
  * Maximum number of path configurations that can be set
  */
+#ifndef ZT_MAX_CONFIGURABLE_PATHS
 #define ZT_MAX_CONFIGURABLE_PATHS 32
+#endif
 
 /**
  * Maximum number of rules per capability
@@ -201,12 +209,16 @@ extern "C" {
 /**
  * Global maximum length for capability chain of custody (including initial issue)
  */
+#ifndef ZT_MAX_CAPABILITY_CUSTODY_CHAIN_LENGTH
 #define ZT_MAX_CAPABILITY_CUSTODY_CHAIN_LENGTH 7
+#endif
 
 /**
  * Maximum number of multicast groups a device / network interface can be subscribed to at once
  */
+#ifndef ZT_MAX_MULTICAST_SUBSCRIPTIONS
 #define ZT_MAX_MULTICAST_SUBSCRIPTIONS 1024
+#endif
 
 /**
  * Maximum value for link quality (min is 0)
@@ -216,7 +228,9 @@ extern "C" {
 /**
  * Maximum number of DNS servers per domain
  */
+#ifndef ZT_MAX_DNS_SERVERS
 #define ZT_MAX_DNS_SERVERS 4
+#endif
 
 /**
  * Packet characteristics flag: packet direction, 1 if inbound 0 if outbound

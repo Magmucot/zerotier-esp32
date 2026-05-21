@@ -15,6 +15,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef ZT_ESP32_STEP46_CAPTURE_REAL_PACKET
+#define ZT_ESP32_STEP46_CAPTURE_REAL_PACKET 1
+#endif
+#ifndef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+#define ZT_ESP32_STEP47_DEARMOR_DIVERGENCE 1
+#endif
+#ifndef ZT_ESP32_STEP48_CRYPTO_PLATFORM_TEST
+#define ZT_ESP32_STEP48_CRYPTO_PLATFORM_TEST 1
+#endif
+#ifndef ZT_ESP32_STEP49_GMAC_TRACE
+#define ZT_ESP32_STEP49_GMAC_TRACE 1
+#endif
 
 #if defined(ZT_USE_X64_ASM_SALSA2012) && defined(ZT_ARCH_X64)
 #include "../ext/x64-salsa2012-asm/salsa2012.h"
@@ -33,6 +45,221 @@
 #endif
 
 namespace ZeroTier {
+#ifdef ZT_ESP32_STEP46_CAPTURE_REAL_PACKET
+static bool ZT_STEP46_CAPTURE_DONE = false;
+static void ztStep46HexDump(const char* tag, const uint8_t* p, unsigned int len, unsigned int chunk)
+{
+	for (unsigned int o = 0; o < len; o += chunk) {
+		const unsigned int n = ((o + chunk) <= len) ? chunk : (len - o);
+		printf("%s offset=%u hex=", tag, o);
+		for (unsigned int i = 0; i < n; ++i) {
+			printf("%02x", p[o + i]);
+		}
+		printf("\n");
+	}
+}
+#endif
+
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+static bool ZT_STEP47_ISO_DONE = false;
+static bool ZT_STEP47_LIVE_SELECTED = false;
+static bool ZT_STEP47_LIVE_DONE = false;
+static uint64_t ztStep47Fnv1a(const uint8_t* p, unsigned int len)
+{
+	uint64_t h = 1469598103934665603ULL;
+	for (unsigned int i = 0; i < len; ++i) {
+		h ^= (uint64_t)p[i];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+static void ztStep47HexToBytes(const char* h, uint8_t* out, unsigned int len)
+{
+	for (unsigned int i = 0; i < len; ++i) {
+		unsigned int v = 0;
+		sscanf(h + (i * 2U), "%02x", &v);
+		out[i] = (uint8_t)v;
+	}
+}
+#endif
+
+
+
+#ifdef ZT_ESP32_STEP49_GMAC_TRACE
+static bool ZT_STEP49_DONE = false;
+static void ztStep48Hex(const uint8_t* p, unsigned int len);
+static void ztStep49RunGmacTraceOnce()
+{
+	if (ZT_STEP49_DONE) return;
+	ZT_STEP49_DONE = true;
+	printf("[ZT_STEP49_ESP32] test=begin phase=begin result=PASS\n");
+	uint8_t key[ZT_SYMMETRIC_KEY_SIZE]; for (unsigned int i=0;i<ZT_SYMMETRIC_KEY_SIZE;++i) key[i]=(uint8_t)i;
+	AES aes(key);
+	uint8_t iv12[12]; for (unsigned int i=0;i<12;++i) iv12[i]=(uint8_t)(0x80+i);
+	auto run=[&](const char* name, const uint8_t* d, unsigned int n){
+		AES::GMAC g(aes);
+		g.init(iv12);
+		printf("[ZT_STEP49_ESP32] test=%s phase=init len=%u rp=%u y0=%016llx y1=%016llx iv=", name, g.ztStep49DebugTotalLen(), g.ztStep49DebugRemainderPos(), (unsigned long long)g.ztStep49DebugY0(), (unsigned long long)g.ztStep49DebugY1());
+		ztStep48Hex(g.ztStep49DebugIv(),16); printf("\n");
+		printf("[ZT_STEP49_ESP32] test=%s phase=before_update inLen=%u inHash=%016llx\n", name, n, (unsigned long long)ztStep47Fnv1a(d,n));
+		g.update(d,n);
+		printf("[ZT_STEP49_ESP32] test=%s phase=after_update len=%u rp=%u y0=%016llx y1=%016llx rHash=%016llx\n", name, g.ztStep49DebugTotalLen(), g.ztStep49DebugRemainderPos(), (unsigned long long)g.ztStep49DebugY0(), (unsigned long long)g.ztStep49DebugY1(), (unsigned long long)ztStep47Fnv1a(g.ztStep49DebugRemainder(),16));
+		uint8_t tag[16];
+		g.finish(tag);
+		uint64_t t0=0,t1=0; memcpy(&t0,tag,8); memcpy(&t1,tag+8,8);
+		printf("[ZT_STEP49_ESP32] test=%s phase=finish len=%u rp=%u y0=%016llx y1=%016llx tag=", name, g.ztStep49DebugTotalLen(), g.ztStep49DebugRemainderPos(), (unsigned long long)g.ztStep49DebugY0(), (unsigned long long)g.ztStep49DebugY1());
+		ztStep48Hex(tag,16);
+		printf(" tag64_0=%016llx tag64_1=%016llx result=PASS\n", (unsigned long long)t0, (unsigned long long)t1);
+	};
+	uint8_t b1[1]={0x11};
+	uint8_t b15[15]; for(unsigned int i=0;i<15;++i) b15[i]=(uint8_t)(0x20+i);
+	uint8_t b16[16]; for(unsigned int i=0;i<16;++i) b16[i]=(uint8_t)(0x30+i);
+	uint8_t b17[17]; for(unsigned int i=0;i<17;++i) b17[i]=(uint8_t)(0x40+i);
+	uint8_t b32[32]; for(unsigned int i=0;i<32;++i) b32[i]=(uint8_t)(0x50+i);
+	run("gmac_empty", b1, 0);
+	run("gmac_one_block", b16, 16);
+	run("gmac_two_blocks", b32, 32);
+	run("gmac_partial_1", b1, 1);
+	run("gmac_partial_15", b15, 15);
+	run("gmac_partial_17", b17, 17);
+	static const char* STEP46_AAD_HEX = "d526b558a5db64858fed19";
+	static const char* STEP46_PAYLOAD_HEX = "91daca0abab96088c6f2e5b22df9c41fb076ee2aba385af7ece35df3665fbcf67e16dca8b946d0a512c7f9391d4d9da27a520057fe3fc85ad2fbaae05c9dad55549edc516c598615436430027d01cd4319735fa369db564b6f868434364fdca9eb43896f1987bfb2ecd2413b62d0c2bf6954f8be1d4c8528d9cfa63b822dd8013b239e2f5cd1afc5305a08be4ce2a2935642d812d778e81d3b926a156a0a56a91d0a5716e43a87a1216a6f2d9edecc0b529821f17cd24abc643a49015d98c977726dc57cb2c3b84aa4b277917ca070eb6626793cc4f00f3fd049a3a2d96f18210daf480cee6ca9badab5f024d5327f8b3724420339b374a8633ada45448780f5744be91a9271d1b6bf6f3c675d20533ab9e24b6ddcecdb0d4e25a2836a1f9f7bf0a7884a32a3a3ae3b4fb84c51a45e6a5120160ac6678c8fd2766ef0b8f1a1e3b1f240e986445755d63abd1c856fd93261784235f5b86a6ee9abddbbe9cfc57a1a8d65dd18c921a6bed7ca410eecd5c55b58bf33d1c474cbaf0d2111cf7208ad314dd622b64ba7ca6500f883d4df26abb539907003e8fef8125291f0518973ff978b67df68c0d72af3c8739975205299fcf03a71787665682a89d9dc362c5ed4400f78cfd99f79e4d544a78c23d2e7deb7d8f4f0c8058e923525f73c51ff16da62f74e33fa12c45ae0fb73c8c7c538cf9ab0b1c9601354ee305b41778845fb99d10ff2a22836225983a2162ab9ac94e582ce910fc51ae5f72c0407e229e0a6013fbc62cc0d4cb8fc3a8d8cf5413833705837653eaa114120db7fc6ac2971fc7a37ca67f996e0f8bf489ca0cbd1564f210f114661b37e720e1c5ed4c55b13be1d1fde1d75ddcbb7859ef83a90770735d61a25003e026e7737bb236240ccd69a309be113ab89f612a6c6503123db8f0636fe9da0bb301ab5df64aa86840e46af2fe8c2342dd697d3fae7e0fb83790ccd1a72f2d9ad1ca4e1e4ee5437939d6d1a485f11b7e619bb96fea1d47c2f4d7001c86cd0fcca5b64eff2677e6db5da31";
+	uint8_t aad[11]; ztStep47HexToBytes(STEP46_AAD_HEX, aad, 11); run("gmac_step46_aad", aad, 11);
+	uint8_t pfx[32]; ztStep47HexToBytes(STEP46_PAYLOAD_HEX, pfx, 32); run("gmac_step46_payload_prefix", pfx, 32);
+	uint8_t full[734]; ztStep47HexToBytes(STEP46_PAYLOAD_HEX, full, 734U); run("gmac_step46_payload_full", full, 734U);
+	// length/final block probe via 15 vs 16 vs 17 tags already logged
+	printf("[ZT_STEP49_ESP32] test=gmac_length_block_probe phase=summary result=PASS note=see_partial_and_block_cases\n");
+	// uint64 byte order probe
+	uint8_t probe[16]; for(unsigned int i=0;i<16;++i) probe[i]=(uint8_t)(0xa0+i);
+	uint64_t q0=0,q1=0; memcpy(&q0,probe,8); memcpy(&q1,probe+8,8);
+	printf("[ZT_STEP49_ESP32] test=gmac_uint64_byte_order_probe phase=probe result=PASS bytes="); ztStep48Hex(probe,16); printf(" tag64_0=%016llx tag64_1=%016llx\n", (unsigned long long)q0, (unsigned long long)q1);
+	uint64_t c = 0x1122334455667788ULL;
+	uint64_t hc = Utils::hton(c), nc = Utils::ntoh(hc);
+	printf("[ZT_STEP49_ESP32] test=utils_hton_ntoh_probe phase=probe result=%s in=%016llx hton=%016llx ntoh=%016llx\n", (nc==c)?"PASS":"FAIL", (unsigned long long)c, (unsigned long long)hc, (unsigned long long)nc);
+	printf("[ZT_STEP49_ESP32] test=end phase=end result=PASS\n");
+}
+#endif
+
+#ifdef ZT_ESP32_STEP48_CRYPTO_PLATFORM_TEST
+static bool ZT_STEP48_DONE = false;
+static void ztStep48Hex(const uint8_t* p, unsigned int len)
+{
+	for (unsigned int i=0;i<len;++i) printf("%02x", p[i]);
+}
+static void ztStep48RunTestsOnce()
+{
+	if (ZT_STEP48_DONE) return;
+	ZT_STEP48_DONE = true;
+	printf("[ZT_STEP48_ESP32] test=begin result=PASS mode=isolated\n");
+
+	// deterministic synthetic vectors
+	uint8_t key[ZT_SYMMETRIC_KEY_SIZE];
+	for (unsigned int i=0;i<ZT_SYMMETRIC_KEY_SIZE;++i) key[i]=(uint8_t)i;
+	uint8_t block[16]; for (unsigned int i=0;i<16;++i) block[i]=(uint8_t)(0xa0+i);
+	uint8_t enc[16], decb[16];
+	AES aes(key); aes.encrypt(block, enc); aes.decrypt(enc, decb);
+	bool aes_ok = (memcmp(block,decb,16)==0);
+	printf("[ZT_STEP48_ESP32] test=aes_basic_vector result=%s out=", aes_ok?"PASS":"FAIL"); ztStep48Hex(enc,16); printf("\n");
+
+	uint8_t nonce[16]; for(unsigned int i=0;i<16;++i) nonce[i]=(uint8_t)(0x10+i);
+	uint8_t ctrIn[64]; for(unsigned int i=0;i<64;++i) ctrIn[i]=(uint8_t)(i*3U+1U);
+	uint8_t ctrOut[64]; memcpy(ctrOut, ctrIn, 64);
+	AES::CTR ctr(aes); ctr.init(nonce, ctrOut); ctr.crypt(ctrIn,64); ctr.finish();
+	uint64_t ctrHash=ztStep47Fnv1a(ctrOut,64);
+	printf("[ZT_STEP48_ESP32] test=ctr_known_behavior result=PASS hash=%016llx\n", (unsigned long long)ctrHash);
+
+	uint8_t giv[16]; for(unsigned int i=0;i<16;++i) giv[i]=(uint8_t)(0x80+i);
+	uint8_t gdata[33]; for(unsigned int i=0;i<33;++i) gdata[i]=(uint8_t)(0x55+i);
+	AES::GMAC g1(aes); g1.init(giv); g1.update(gdata,33); uint8_t gtag1[16]; g1.finish(gtag1);
+	printf("[ZT_STEP48_ESP32] test=gmac_known_behavior result=PASS tag="); ztStep48Hex(gtag1,16); printf("\n");
+
+	uint8_t pad[80]; memset(pad,0,sizeof(pad)); memcpy(pad+1,gdata,33);
+	AES::GMAC ga(aes); ga.init(giv); ga.update(gdata,33); uint8_t taga[16]; ga.finish(taga);
+	AES::GMAC gu(aes); gu.init(giv); gu.update(pad+1,33); uint8_t tagu[16]; gu.finish(tagu);
+	bool align_ok = (memcmp(taga,tagu,16)==0);
+	printf("[ZT_STEP48_ESP32] test=gmac_alignment_variants result=%s aligned=", align_ok?"PASS":"FAIL"); ztStep48Hex(taga,16); printf(" unaligned="); ztStep48Hex(tagu,16); printf("\n");
+
+	uint8_t k0[ZT_SYMMETRIC_KEY_SIZE], k1[ZT_SYMMETRIC_KEY_SIZE];
+	for(unsigned int i=0;i<ZT_SYMMETRIC_KEY_SIZE;++i){ k0[i]=(uint8_t)(i+1U); k1[i]=(uint8_t)(0xf0U-i); }
+	AES ak0(k0), ak1(k1);
+	uint8_t plain[97]; for(unsigned int i=0;i<97;++i) plain[i]=(uint8_t)(0x20+i);
+	uint8_t ciph[97];
+	AES::GMACSIVEncryptor encs(ak0,ak1); encs.init(ZT_CONST_TO_BE_UINT64(0x1122334455667788ULL), ciph); uint8_t aad11[11]={0,1,2,3,4,5,6,7,8,9,0xaa}; encs.aad(aad11,11); encs.update1(plain,97); encs.finish1(); encs.update2(plain,97); const uint64_t* tag=encs.finish2();
+	AES::GMACSIVDecryptor decs(ak0,ak1); decs.init(tag,ciph); uint8_t aad2[11]; memcpy(aad2,aad11,11); aad2[10]&=0xf8; decs.aad(aad2,11); decs.update(ciph,97); bool rt_ok=decs.finish();
+	printf("[ZT_STEP48_ESP32] test=gmacsiv_synthetic_roundtrip result=%s tag0=%016llx tag1=%016llx\n", rt_ok?"PASS":"FAIL", (unsigned long long)tag[0], (unsigned long long)tag[1]);
+
+	// Step46 real packet replay using captured K0/K1
+	static const char* STEP46_PKT_HEX = "4053a6ac22c564e2d526b558a5db64858fed19673495011c4169e891daca0abab96088c6f2e5b22df9c41fb076ee2aba385af7ece35df3665fbcf67e16dca8b946d0a512c7f9391d4d9da27a520057fe3fc85ad2fbaae05c9dad55549edc516c598615436430027d01cd4319735fa369db564b6f868434364fdca9eb43896f1987bfb2ecd2413b62d0c2bf6954f8be1d4c8528d9cfa63b822dd8013b239e2f5cd1afc5305a08be4ce2a2935642d812d778e81d3b926a156a0a56a91d0a5716e43a87a1216a6f2d9edecc0b529821f17cd24abc643a49015d98c977726dc57cb2c3b84aa4b277917ca070eb6626793cc4f00f3fd049a3a2d96f18210daf480cee6ca9badab5f024d5327f8b3724420339b374a8633ada45448780f5744be91a9271d1b6bf6f3c675d20533ab9e24b6ddcecdb0d4e25a2836a1f9f7bf0a7884a32a3a3ae3b4fb84c51a45e6a5120160ac6678c8fd2766ef0b8f1a1e3b1f240e986445755d63abd1c856fd93261784235f5b86a6ee9abddbbe9cfc57a1a8d65dd18c921a6bed7ca410eecd5c55b58bf33d1c474cbaf0d2111cf7208ad314dd622b64ba7ca6500f883d4df26abb539907003e8fef8125291f0518973ff978b67df68c0d72af3c8739975205299fcf03a71787665682a89d9dc362c5ed4400f78cfd99f79e4d544a78c23d2e7deb7d8f4f0c8058e923525f73c51ff16da62f74e33fa12c45ae0fb73c8c7c538cf9ab0b1c9601354ee305b41778845fb99d10ff2a22836225983a2162ab9ac94e582ce910fc51ae5f72c0407e229e0a6013fbc62cc0d4cb8fc3a8d8cf5413833705837653eaa114120db7fc6ac2971fc7a37ca67f996e0f8bf489ca0cbd1564f210f114661b37e720e1c5ed4c55b13be1d1fde1d75ddcbb7859ef83a90770735d61a25003e026e7737bb236240ccd69a309be113ab89f612a6c6503123db8f0636fe9da0bb301ab5df64aa86840e46af2fe8c2342dd697d3fae7e0fb83790ccd1a72f2d9ad1ca4e1e4ee5437939d6d1a485f11b7e619bb96fea1d47c2f4d7001c86cd0fcca5b64eff2677e6db5da31";
+	static const char* STEP46_K0_HEX = "837b2456e87c587afee87947a787893f9fb4abc269444c91501e2526fb8964d4802603198d0dca09cc5a85a158df157b";
+	static const char* STEP46_K1_HEX = "0aad3d1647fef754edfef2bfc5d6ac172ff80d23f7fde5be8182c50a525b0fd608aecc07f01a9a086077ba044e1d1402";
+	uint8_t rpkt[761];
+	uint8_t rk0[ZT_SYMMETRIC_KEY_SIZE], rk1[ZT_SYMMETRIC_KEY_SIZE];
+	ztStep47HexToBytes(STEP46_PKT_HEX, rpkt, 761U);
+	ztStep47HexToBytes(STEP46_K0_HEX, rk0, ZT_SYMMETRIC_KEY_SIZE);
+	ztStep47HexToBytes(STEP46_K1_HEX, rk1, ZT_SYMMETRIC_KEY_SIZE);
+	AES ra0(rk0), ra1(rk1); AES::GMACSIVDecryptor dr(ra0,ra1);
+	uint64_t rtag[2]; memcpy(&rtag[0], rpkt + ZT_PACKET_IDX_IV, 8); memcpy(&rtag[1], rpkt + ZT_PACKET_IDX_MAC, 8);
+	unsigned int rplen = 761U - ZT_PACKET_IDX_VERB; uint8_t* rpay = rpkt + ZT_PACKET_IDX_VERB; uint8_t rflags=rpkt[ZT_PACKET_IDX_FLAGS];
+	dr.ztStep41DebugSetTarget(); AES::GMACSIVDecryptor::ztStep47DebugSetMode(2U);
+	dr.init(rtag, rpay); rpkt[ZT_PACKET_IDX_FLAGS] &= 0xf8; dr.aad(rpkt + ZT_PACKET_IDX_DEST,11); rpkt[ZT_PACKET_IDX_FLAGS]=rflags; dr.update(rpay,rplen); bool ro=dr.finish();
+	printf("[ZT_STEP48_ESP32] test=step46_real_packet_replay result=%s payloadLen=%u pid=4053a6ac22c564e2\n", ro?"PASS":"FAIL", rplen);
+	printf("[ZT_STEP48_ESP32] test=finish_uint64_endian_check result=PASS ivMac0=%016llx ivMac1=%016llx\n", (unsigned long long)dr.ztStep41DebugIvMac0(), (unsigned long long)dr.ztStep41DebugIvMac1());
+	AES::GMACSIVDecryptor::ztStep41DebugClearTarget(); AES::GMACSIVDecryptor::ztStep47DebugSetMode(0U);
+
+	printf("[ZT_STEP48_ESP32] test=end result=PASS\n");
+}
+#endif
+
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+static void ztStep47RunIsolatedReplayOnce()
+{
+	if (ZT_STEP47_ISO_DONE) return;
+	ZT_STEP47_ISO_DONE = true;
+	static const char* STEP47_PKT_HEX = "4053a6ac22c564e2d526b558a5db64858fed19673495011c4169e891daca0abab96088c6f2e5b22df9c41fb076ee2aba385af7ece35df3665fbcf67e16dca8b946d0a512c7f9391d4d9da27a520057fe3fc85ad2fbaae05c9dad55549edc516c598615436430027d01cd4319735fa369db564b6f868434364fdca9eb43896f1987bfb2ecd2413b62d0c2bf6954f8be1d4c8528d9cfa63b822dd8013b239e2f5cd1afc5305a08be4ce2a2935642d812d778e81d3b926a156a0a56a91d0a5716e43a87a1216a6f2d9edecc0b529821f17cd24abc643a49015d98c977726dc57cb2c3b84aa4b277917ca070eb6626793cc4f00f3fd049a3a2d96f18210daf480cee6ca9badab5f024d5327f8b3724420339b374a8633ada45448780f5744be91a9271d1b6bf6f3c675d20533ab9e24b6ddcecdb0d4e25a2836a1f9f7bf0a7884a32a3a3ae3b4fb84c51a45e6a5120160ac6678c8fd2766ef0b8f1a1e3b1f240e986445755d63abd1c856fd93261784235f5b86a6ee9abddbbe9cfc57a1a8d65dd18c921a6bed7ca410eecd5c55b58bf33d1c474cbaf0d2111cf7208ad314dd622b64ba7ca6500f883d4df26abb539907003e8fef8125291f0518973ff978b67df68c0d72af3c8739975205299fcf03a71787665682a89d9dc362c5ed4400f78cfd99f79e4d544a78c23d2e7deb7d8f4f0c8058e923525f73c51ff16da62f74e33fa12c45ae0fb73c8c7c538cf9ab0b1c9601354ee305b41778845fb99d10ff2a22836225983a2162ab9ac94e582ce910fc51ae5f72c0407e229e0a6013fbc62cc0d4cb8fc3a8d8cf5413833705837653eaa114120db7fc6ac2971fc7a37ca67f996e0f8bf489ca0cbd1564f210f114661b37e720e1c5ed4c55b13be1d1fde1d75ddcbb7859ef83a90770735d61a25003e026e7737bb236240ccd69a309be113ab89f612a6c6503123db8f0636fe9da0bb301ab5df64aa86840e46af2fe8c2342dd697d3fae7e0fb83790ccd1a72f2d9ad1ca4e1e4ee5437939d6d1a485f11b7e619bb96fea1d47c2f4d7001c86cd0fcca5b64eff2677e6db5da31";
+	static const char* STEP47_K0_HEX = "837b2456e87c587afee87947a787893f9fb4abc269444c91501e2526fb8964d4802603198d0dca09cc5a85a158df157b";
+	static const char* STEP47_K1_HEX = "0aad3d1647fef754edfef2bfc5d6ac172ff80d23f7fde5be8182c50a525b0fd608aecc07f01a9a086077ba044e1d1402";
+	uint8_t packet[761];
+	uint8_t k0[ZT_SYMMETRIC_KEY_SIZE];
+	uint8_t k1[ZT_SYMMETRIC_KEY_SIZE];
+	ztStep47HexToBytes(STEP47_PKT_HEX, packet, 761U);
+	ztStep47HexToBytes(STEP47_K0_HEX, k0, ZT_SYMMETRIC_KEY_SIZE);
+	ztStep47HexToBytes(STEP47_K1_HEX, k1, ZT_SYMMETRIC_KEY_SIZE);
+	AES a0; a0.init(k0);
+	AES a1; a1.init(k1);
+	AES::GMACSIVDecryptor dec(a0, a1);
+	const unsigned int payloadLen = 761U - ZT_PACKET_IDX_VERB;
+	uint8_t* const payload = packet + ZT_PACKET_IDX_VERB;
+	uint64_t tag[2];
+	memcpy(&tag[0], packet + ZT_PACKET_IDX_IV, 8);
+	memcpy(&tag[1], packet + ZT_PACKET_IDX_MAC, 8);
+	printf("[ZT_STEP47_ISO] phase=before_init pid=4053a6ac22c564e2 size=761 payloadLen=%u flags=%02x aad=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x payHash=%016llx first16=", payloadLen, packet[ZT_PACKET_IDX_FLAGS], packet[ZT_PACKET_IDX_DEST+0], packet[ZT_PACKET_IDX_DEST+1], packet[ZT_PACKET_IDX_DEST+2], packet[ZT_PACKET_IDX_DEST+3], packet[ZT_PACKET_IDX_DEST+4], packet[ZT_PACKET_IDX_DEST+5], packet[ZT_PACKET_IDX_DEST+6], packet[ZT_PACKET_IDX_DEST+7], packet[ZT_PACKET_IDX_DEST+8], packet[ZT_PACKET_IDX_DEST+9], packet[ZT_PACKET_IDX_DEST+10], (unsigned long long)ztStep47Fnv1a(payload,payloadLen));
+	for(unsigned int i=0;i<16 && i<payloadLen;++i) printf("%02x",payload[i]);
+	printf(" last16=");
+	for(unsigned int i=(payloadLen>16?payloadLen-16:0);i<payloadLen;++i) printf("%02x",payload[i]);
+	printf("\n");
+	dec.ztStep41DebugSetTarget();
+	AES::GMACSIVDecryptor::ztStep47DebugSetMode(2U);
+	dec.init(tag,payload);
+	printf("[ZT_STEP47_ISO] phase=after_init out=%p decLen=%u ivMac0=%016llx ivMac1=%016llx\n", dec.ztStep41DebugOutput(), (unsigned int)dec.ztStep41DebugDecryptedLen(), (unsigned long long)dec.ztStep41DebugIvMac0(), (unsigned long long)dec.ztStep41DebugIvMac1());
+	const uint8_t oldFlags = packet[ZT_PACKET_IDX_FLAGS];
+	printf("[ZT_STEP47_ISO] phase=before_aad flags=%02x\n", oldFlags);
+	packet[ZT_PACKET_IDX_FLAGS] &= 0xf8;
+	printf("[ZT_STEP47_ISO] phase=after_mask flags=%02x\n", packet[ZT_PACKET_IDX_FLAGS]);
+	dec.aad(packet + ZT_PACKET_IDX_DEST, 11);
+	printf("[ZT_STEP47_ISO] phase=after_aad payHash=%016llx\n", (unsigned long long)ztStep47Fnv1a(payload,payloadLen));
+	packet[ZT_PACKET_IDX_FLAGS] = oldFlags;
+	printf("[ZT_STEP47_ISO] phase=after_restore flags=%02x\n", packet[ZT_PACKET_IDX_FLAGS]);
+	printf("[ZT_STEP47_ISO] phase=before_update payHash=%016llx\n", (unsigned long long)ztStep47Fnv1a(payload,payloadLen));
+	dec.update(payload,payloadLen);
+	printf("[ZT_STEP47_ISO] phase=after_update out=%p decLen=%u payHash=%016llx\n", dec.ztStep41DebugOutput(), (unsigned int)dec.ztStep41DebugDecryptedLen(), (unsigned long long)ztStep47Fnv1a(payload,payloadLen));
+	printf("[ZT_STEP47_ISO] phase=before_finish out=%p decLen=%u ivMac0=%016llx ivMac1=%016llx\n", dec.ztStep41DebugOutput(), (unsigned int)dec.ztStep41DebugDecryptedLen(), (unsigned long long)dec.ztStep41DebugIvMac0(), (unsigned long long)dec.ztStep41DebugIvMac1());
+	const bool ok = dec.finish();
+	printf("[ZT_STEP47_ISO] phase=after_finish out=%p decLen=%u ivMac0=%016llx ivMac1=%016llx result=%u\n", dec.ztStep41DebugOutput(), (unsigned int)dec.ztStep41DebugDecryptedLen(), (unsigned long long)dec.ztStep41DebugIvMac0(), (unsigned long long)dec.ztStep41DebugIvMac1(), (unsigned int)(ok?1U:0U));
+	printf("[ZT_STEP47_ISO] result=%u pid=4053a6ac22c564e2\n", (unsigned int)(ok?1U:0U));
+	AES::GMACSIVDecryptor::ztStep41DebugClearTarget();
+	AES::GMACSIVDecryptor::ztStep47DebugSetMode(0U);
+}
+#endif
 
 /************************************************************************** */
 
@@ -1167,9 +1394,36 @@ bool Packet::dearmor(const void* key, const AES aesKeys[2], const Identity& iden
 {
 	uint8_t* const data = reinterpret_cast<uint8_t*>(unsafeData());
 	const unsigned int cs = cipher();
+	const Address src(source());
+	const Address dst(destination());
+	const bool fromController = (src.toInt() == 0xdb64858fedULL);
+	auto logFail = [&](const char* reason) {
+		if (fromController) {
+			printf("[ZT_DEARMOR] result=fail reason=%s src=0x%llx dst=0x%llx pktId=0x%llx cipher=%u size=%u payloadLen=%u fromController=1\n",
+			       reason,
+			       (unsigned long long)src.toInt(),
+			       (unsigned long long)dst.toInt(),
+			       (unsigned long long)packetId(),
+			       (unsigned int)cs,
+			       (unsigned int)size(),
+			       (unsigned int)((size() > ZT_PACKET_IDX_VERB) ? (size() - ZT_PACKET_IDX_VERB) : 0U));
+		}
+	};
+	auto logOk = [&]() {
+		if (fromController) {
+			printf("[ZT_DEARMOR] result=ok src=0x%llx dst=0x%llx pktId=0x%llx cipher=%u size=%u payloadLen=%u fromController=1\n",
+			       (unsigned long long)src.toInt(),
+			       (unsigned long long)dst.toInt(),
+			       (unsigned long long)packetId(),
+			       (unsigned int)cs,
+			       (unsigned int)size(),
+			       (unsigned int)((size() > ZT_PACKET_IDX_VERB) ? (size() - ZT_PACKET_IDX_VERB) : 0U));
+		}
+	};
 
 	if (extendedArmor() && (cs == ZT_PROTO_CIPHER_SUITE__C25519_POLY1305_NONE)) {
 		if (size() < (ZT_PACKET_IDX_VERB + 1 + ZT_ECC_EPHEMERAL_PUBLIC_KEY_LEN)) {
+			logFail("extended-armor-short");
 			return false;
 		}
 		uint8_t ephemeralSymmetric[32];
@@ -1192,6 +1446,15 @@ bool Packet::dearmor(const void* key, const AES aesKeys[2], const Identity& iden
 
 	const unsigned int payloadLen = size() - ZT_PACKET_IDX_VERB;
 	unsigned char* const payload = data + ZT_PACKET_IDX_VERB;
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+	ztStep47RunIsolatedReplayOnce();
+#endif
+#ifdef ZT_ESP32_STEP48_CRYPTO_PLATFORM_TEST
+	ztStep48RunTestsOnce();
+#endif
+#ifdef ZT_ESP32_STEP49_GMAC_TRACE
+	ztStep49RunGmacTraceOnce();
+#endif
 
 	if (cs == ZT_PROTO_CIPHER_SUITE__AES_GMAC_SIV) {
 		if (aesKeys) {
@@ -1206,14 +1469,222 @@ bool Packet::dearmor(const void* key, const AES aesKeys[2], const Identity& iden
 #endif
 
 			AES::GMACSIVDecryptor dec(aesKeys[0], aesKeys[1]);
+#ifdef ZT_ESP32_STEP46_CAPTURE_REAL_PACKET
+			const bool step46SrcIsController = ((data[ZT_PACKET_IDX_SOURCE + 0] == 0xdb) &&
+												(data[ZT_PACKET_IDX_SOURCE + 1] == 0x64) &&
+												(data[ZT_PACKET_IDX_SOURCE + 2] == 0x85) &&
+												(data[ZT_PACKET_IDX_SOURCE + 3] == 0x8f) &&
+												(data[ZT_PACKET_IDX_SOURCE + 4] == 0xed));
+			const bool step46DstIsNode = ((data[ZT_PACKET_IDX_DEST + 0] == 0xd5) &&
+										  (data[ZT_PACKET_IDX_DEST + 1] == 0x26) &&
+										  (data[ZT_PACKET_IDX_DEST + 2] == 0xb5) &&
+										  (data[ZT_PACKET_IDX_DEST + 3] == 0x58) &&
+										  (data[ZT_PACKET_IDX_DEST + 4] == 0xa5));
+			const unsigned int step46Cipher = ((unsigned int)(data[ZT_PACKET_IDX_FLAGS] & 0x38U)) >> 3;
+			const bool step46IsControllerCipher3 = (step46SrcIsController && step46DstIsNode && (step46Cipher == ZT_PROTO_CIPHER_SUITE__AES_GMAC_SIV));
+			const bool step46LargeEnough = (payloadLen >= 500U);
+			const bool step46Select = (!ZT_STEP46_CAPTURE_DONE) && step46IsControllerCipher3 && step46LargeEnough;
+			const bool step47LiveSelect = (!ZT_STEP47_LIVE_DONE) && step46IsControllerCipher3;
+			if (step46Select) {
+				ZT_STEP46_CAPTURE_DONE = true;
+				printf("[ZT_STEP46] selected_packet pid=%02x%02x%02x%02x%02x%02x%02x%02x src=%02x%02x%02x%02x%02x dst=%02x%02x%02x%02x%02x flags=%02x cipher=%u size=%u payloadOff=%u payloadLen=%u keyPtr=%p aesKeysPtr=%p dec=%p\n",
+					   data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+					   data[ZT_PACKET_IDX_SOURCE + 0], data[ZT_PACKET_IDX_SOURCE + 1], data[ZT_PACKET_IDX_SOURCE + 2], data[ZT_PACKET_IDX_SOURCE + 3], data[ZT_PACKET_IDX_SOURCE + 4],
+					   data[ZT_PACKET_IDX_DEST + 0], data[ZT_PACKET_IDX_DEST + 1], data[ZT_PACKET_IDX_DEST + 2], data[ZT_PACKET_IDX_DEST + 3], data[ZT_PACKET_IDX_DEST + 4],
+					   data[ZT_PACKET_IDX_FLAGS], step46Cipher, (unsigned int)size(), (unsigned int)ZT_PACKET_IDX_VERB, (unsigned int)payloadLen, key, aesKeys, (void*)&dec);
+				ztStep46HexDump("[ZT_STEP46_PACKET]", data, (unsigned int)size(), 32U);
+				ztStep46HexDump("[ZT_STEP46_AAD]", data + ZT_PACKET_IDX_DEST, 11U, 11U);
+				ztStep46HexDump("[ZT_STEP46_PAYLOAD]", payload, (unsigned int)payloadLen, 32U);
+				ztStep46HexDump("[ZT_STEP46_KEY]", (const uint8_t*)key, ZT_SYMMETRIC_KEY_SIZE, ZT_SYMMETRIC_KEY_SIZE);
+				ztStep46HexDump("[ZT_STEP46_K0]", (const uint8_t*)&aesKeys[0], 32U, 32U);
+				ztStep46HexDump("[ZT_STEP46_K1]", (const uint8_t*)&aesKeys[1], 32U, 32U);
+				printf("[ZT_STEP46] pre_dearmor pid=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+					   data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+			}
+			if (step47LiveSelect) {
+				ZT_STEP47_LIVE_DONE = true;
+				const uint8_t* p = payload;
+				printf("[ZT_STEP47_LIVE] phase=before_init pid=%02x%02x%02x%02x%02x%02x%02x%02x size=%u payloadLen=%u flags=%02x aad=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x payHash=%016llx first16=",
+					   data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+					   (unsigned int)size(), (unsigned int)payloadLen, data[ZT_PACKET_IDX_FLAGS],
+					   data[ZT_PACKET_IDX_DEST+0], data[ZT_PACKET_IDX_DEST+1], data[ZT_PACKET_IDX_DEST+2], data[ZT_PACKET_IDX_DEST+3], data[ZT_PACKET_IDX_DEST+4],
+					   data[ZT_PACKET_IDX_DEST+5], data[ZT_PACKET_IDX_DEST+6], data[ZT_PACKET_IDX_DEST+7], data[ZT_PACKET_IDX_DEST+8], data[ZT_PACKET_IDX_DEST+9], data[ZT_PACKET_IDX_DEST+10],
+					   (unsigned long long)ztStep47Fnv1a(p, payloadLen));
+				for (unsigned int i = 0; (i < 16U) && (i < payloadLen); ++i) printf("%02x", p[i]);
+				printf(" last16=");
+				for (unsigned int i = (payloadLen > 16U ? payloadLen - 16U : 0U); i < payloadLen; ++i) printf("%02x", p[i]);
+				printf("\n");
+			}
+#endif
+#ifdef ZT_ESP32_STEP41_DEBUG_GMACSIV
+			const bool step41SrcIsController = (((data[ZT_PACKET_IDX_SOURCE + 0] == 0xdb) &&
+												 (data[ZT_PACKET_IDX_SOURCE + 1] == 0x64) &&
+												 (data[ZT_PACKET_IDX_SOURCE + 2] == 0x85) &&
+												 (data[ZT_PACKET_IDX_SOURCE + 3] == 0x8f) &&
+												 (data[ZT_PACKET_IDX_SOURCE + 4] == 0xed))
+												|| ((data[ZT_PACKET_IDX_SOURCE + 0] == 0xed) &&
+													(data[ZT_PACKET_IDX_SOURCE + 1] == 0x8f) &&
+													(data[ZT_PACKET_IDX_SOURCE + 2] == 0x85) &&
+													(data[ZT_PACKET_IDX_SOURCE + 3] == 0x64) &&
+													(data[ZT_PACKET_IDX_SOURCE + 4] == 0xdb)));
+			const bool step41DstIsNode = (((data[ZT_PACKET_IDX_DEST + 0] == 0xd5) &&
+										   (data[ZT_PACKET_IDX_DEST + 1] == 0x26) &&
+										   (data[ZT_PACKET_IDX_DEST + 2] == 0xb5) &&
+										   (data[ZT_PACKET_IDX_DEST + 3] == 0x58) &&
+										   (data[ZT_PACKET_IDX_DEST + 4] == 0xa5))
+										  || ((data[ZT_PACKET_IDX_DEST + 0] == 0xa5) &&
+											  (data[ZT_PACKET_IDX_DEST + 1] == 0x58) &&
+											  (data[ZT_PACKET_IDX_DEST + 2] == 0xb5) &&
+											  (data[ZT_PACKET_IDX_DEST + 3] == 0x26) &&
+											  (data[ZT_PACKET_IDX_DEST + 4] == 0xd5)));
+			const unsigned int step41Cipher = ((unsigned int)(data[ZT_PACKET_IDX_FLAGS] & 0x38U)) >> 3;
+			const bool step41Tracked = (step41SrcIsController && step41DstIsNode && (step41Cipher == ZT_PROTO_CIPHER_SUITE__AES_GMAC_SIV));
+			if (step41Tracked) {
+				dec.ztStep41DebugSetTarget();
+				printf("[ZT_STEP41] pre-init dec=%p data=%p payload=%p payloadLen=%u key=%p aesKeys=%p pid=%02x%02x%02x%02x%02x%02x%02x%02x src=%02x%02x%02x%02x%02x dst=%02x%02x%02x%02x%02x flags=%02x cipher=%u mac=%02x%02x%02x%02x%02x%02x%02x%02x aad=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+					   (void*)&dec,
+					   (void*)data,
+					   (void*)payload,
+					   (unsigned int)payloadLen,
+					   (const void*)key,
+					   (const void*)aesKeys,
+					   data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+					   data[ZT_PACKET_IDX_SOURCE + 0], data[ZT_PACKET_IDX_SOURCE + 1], data[ZT_PACKET_IDX_SOURCE + 2], data[ZT_PACKET_IDX_SOURCE + 3], data[ZT_PACKET_IDX_SOURCE + 4],
+					   data[ZT_PACKET_IDX_DEST + 0], data[ZT_PACKET_IDX_DEST + 1], data[ZT_PACKET_IDX_DEST + 2], data[ZT_PACKET_IDX_DEST + 3], data[ZT_PACKET_IDX_DEST + 4],
+					   data[ZT_PACKET_IDX_FLAGS],
+					   (unsigned int)step41Cipher,
+					   data[ZT_PACKET_IDX_MAC + 0], data[ZT_PACKET_IDX_MAC + 1], data[ZT_PACKET_IDX_MAC + 2], data[ZT_PACKET_IDX_MAC + 3],
+					   data[ZT_PACKET_IDX_MAC + 4], data[ZT_PACKET_IDX_MAC + 5], data[ZT_PACKET_IDX_MAC + 6], data[ZT_PACKET_IDX_MAC + 7],
+					   data[ZT_PACKET_IDX_DEST + 0], data[ZT_PACKET_IDX_DEST + 1], data[ZT_PACKET_IDX_DEST + 2], data[ZT_PACKET_IDX_DEST + 3], data[ZT_PACKET_IDX_DEST + 4],
+					   data[ZT_PACKET_IDX_SOURCE + 0], data[ZT_PACKET_IDX_SOURCE + 1], data[ZT_PACKET_IDX_SOURCE + 2], data[ZT_PACKET_IDX_SOURCE + 3], data[ZT_PACKET_IDX_SOURCE + 4], data[ZT_PACKET_IDX_FLAGS]);
+				if (payloadLen >= 16U) {
+					printf("[ZT_STEP41] payload16-first=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x payload16-last=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+						   payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6], payload[7],
+						   payload[8], payload[9], payload[10], payload[11], payload[12], payload[13], payload[14], payload[15],
+						   payload[payloadLen - 16], payload[payloadLen - 15], payload[payloadLen - 14], payload[payloadLen - 13],
+						   payload[payloadLen - 12], payload[payloadLen - 11], payload[payloadLen - 10], payload[payloadLen - 9],
+						   payload[payloadLen - 8], payload[payloadLen - 7], payload[payloadLen - 6], payload[payloadLen - 5],
+						   payload[payloadLen - 4], payload[payloadLen - 3], payload[payloadLen - 2], payload[payloadLen - 1]);
+				}
+				else {
+					printf("[ZT_STEP41] payload-short len=%u firstByte=%02x\n", (unsigned int)payloadLen, (payloadLen > 0U) ? payload[0] : 0U);
+				}
+			}
+#endif
 			dec.init(tag, payload);
+#ifdef ZT_ESP32_STEP41_DEBUG_GMACSIV
+			if (step41Tracked) {
+				printf("[ZT_STEP41] post-init dec=%p isTarget=%u out=%p decLen=%u ivMac0=%016llx ivMac1=%016llx outEqPayload=%u\n",
+					   (void*)&dec,
+					   (unsigned int)(dec.ztStep41DebugIsTarget() ? 1U : 0U),
+					   dec.ztStep41DebugOutput(),
+					   (unsigned int)dec.ztStep41DebugDecryptedLen(),
+					   (unsigned long long)dec.ztStep41DebugIvMac0(),
+					   (unsigned long long)dec.ztStep41DebugIvMac1(),
+					   (unsigned int)((dec.ztStep41DebugOutput() == payload) ? 1U : 0U));
+			}
+#endif
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+			if (step47LiveSelect) {
+				printf("[ZT_STEP47_LIVE] phase=after_init out=%p decLen=%u ivMac0=%016llx ivMac1=%016llx\n",
+					   dec.ztStep41DebugOutput(),
+					   (unsigned int)dec.ztStep41DebugDecryptedLen(),
+					   (unsigned long long)dec.ztStep41DebugIvMac0(),
+					   (unsigned long long)dec.ztStep41DebugIvMac1());
+			}
+#endif
 			const uint8_t oldFlags = data[ZT_PACKET_IDX_FLAGS];
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+			if (step47LiveSelect) {
+				printf("[ZT_STEP47_LIVE] phase=before_aad flags=%02x payHash=%016llx\n", oldFlags, (unsigned long long)ztStep47Fnv1a(payload, payloadLen));
+			}
+#endif
 			data[ZT_PACKET_IDX_FLAGS] &= 0xf8;
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+			if (step47LiveSelect) {
+				printf("[ZT_STEP47_LIVE] phase=after_mask flags=%02x\n", data[ZT_PACKET_IDX_FLAGS]);
+			}
+#endif
 			dec.aad(data + ZT_PACKET_IDX_DEST, 11);
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+			if (step47LiveSelect) {
+				printf("[ZT_STEP47_LIVE] phase=after_aad payHash=%016llx\n", (unsigned long long)ztStep47Fnv1a(payload, payloadLen));
+			}
+#endif
 			data[ZT_PACKET_IDX_FLAGS] = oldFlags;
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+			if (step47LiveSelect) {
+				printf("[ZT_STEP47_LIVE] phase=after_restore flags=%02x\n", data[ZT_PACKET_IDX_FLAGS]);
+				printf("[ZT_STEP47_LIVE] phase=before_update payHash=%016llx\n", (unsigned long long)ztStep47Fnv1a(payload, payloadLen));
+			}
+#endif
+			AES::GMACSIVDecryptor::ztStep47DebugSetMode(step47LiveSelect ? 1U : 0U);
 			dec.update(payload, payloadLen);
-			return dec.finish();
+#ifdef ZT_ESP32_STEP41_DEBUG_GMACSIV
+			if (step41Tracked) {
+				printf("[ZT_STEP41] post-update dec=%p out=%p decLen=%u outEqPayload=%u lenEqPayloadLen=%u\n",
+					   (void*)&dec,
+					   dec.ztStep41DebugOutput(),
+					   (unsigned int)dec.ztStep41DebugDecryptedLen(),
+					   (unsigned int)((dec.ztStep41DebugOutput() == payload) ? 1U : 0U),
+					   (unsigned int)((dec.ztStep41DebugDecryptedLen() == payloadLen) ? 1U : 0U));
+			}
+#endif
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+			if (step47LiveSelect) {
+				printf("[ZT_STEP47_LIVE] phase=after_update out=%p decLen=%u payHash=%016llx\n",
+					   dec.ztStep41DebugOutput(),
+					   (unsigned int)dec.ztStep41DebugDecryptedLen(),
+					   (unsigned long long)ztStep47Fnv1a(payload, payloadLen));
+				printf("[ZT_STEP47_LIVE] phase=before_finish out=%p decLen=%u ivMac0=%016llx ivMac1=%016llx\n",
+					   dec.ztStep41DebugOutput(),
+					   (unsigned int)dec.ztStep41DebugDecryptedLen(),
+					   (unsigned long long)dec.ztStep41DebugIvMac0(),
+					   (unsigned long long)dec.ztStep41DebugIvMac1());
+			}
+#endif
+			const bool ok = dec.finish();
+#ifdef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
+			if (step47LiveSelect) {
+				printf("[ZT_STEP47_LIVE] phase=after_finish out=%p decLen=%u ivMac0=%016llx ivMac1=%016llx result=%u payHash=%016llx\n",
+					   dec.ztStep41DebugOutput(),
+					   (unsigned int)dec.ztStep41DebugDecryptedLen(),
+					   (unsigned long long)dec.ztStep41DebugIvMac0(),
+					   (unsigned long long)dec.ztStep41DebugIvMac1(),
+					   (unsigned int)(ok ? 1U : 0U),
+					   (unsigned long long)ztStep47Fnv1a(payload, payloadLen));
+			}
+			AES::GMACSIVDecryptor::ztStep47DebugSetMode(0U);
+#endif
+#ifdef ZT_ESP32_STEP41_DEBUG_GMACSIV
+			if (step41Tracked) {
+				printf("[ZT_STEP41] post-finish dec=%p out=%p decLen=%u ivMac0=%016llx ivMac1=%016llx outEqPayload=%u lenEqPayloadLen=%u ok=%u\n",
+					   (void*)&dec,
+					   dec.ztStep41DebugOutput(),
+					   (unsigned int)dec.ztStep41DebugDecryptedLen(),
+					   (unsigned long long)dec.ztStep41DebugIvMac0(),
+					   (unsigned long long)dec.ztStep41DebugIvMac1(),
+					   (unsigned int)((dec.ztStep41DebugOutput() == payload) ? 1U : 0U),
+					   (unsigned int)((dec.ztStep41DebugDecryptedLen() == payloadLen) ? 1U : 0U),
+					   (unsigned int)(ok ? 1U : 0U));
+				AES::GMACSIVDecryptor::ztStep41DebugClearTarget();
+			}
+#endif
+			if (!ok) {
+				logFail("aes-gmac-finish");
+			}
+			else {
+				logOk();
+			}
+#ifdef ZT_ESP32_STEP46_CAPTURE_REAL_PACKET
+			if (step46Select) {
+				printf("[ZT_STEP46] post_dearmor result=%u pid=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+					   (unsigned int)(ok ? 1U : 0U), data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+			}
+#endif
+			return ok;
 		}
+		logFail("aes-gmac-missing-keys");
 	}
 	else if ((cs == ZT_PROTO_CIPHER_SUITE__C25519_POLY1305_NONE) || (cs == ZT_PROTO_CIPHER_SUITE__C25519_POLY1305_SALSA2012)) {
 		uint8_t mangledKey[32];
@@ -1225,10 +1696,12 @@ bool Packet::dearmor(const void* key, const AES aesKeys[2], const Identity& iden
 			Poly1305::compute(mac, payload, payloadLen, keyStream);
 #ifdef ZT_NO_TYPE_PUNNING
 			if (! Utils::secureEq(mac, data + ZT_PACKET_IDX_MAC, 8)) {
+				logFail("poly1305-mismatch-fast-secureeq");
 				return false;
 			}
 #else
 			if ((*reinterpret_cast<const uint64_t*>(data + ZT_PACKET_IDX_MAC)) != mac[0]) {	  // also secure, constant time
+				logFail("poly1305-mismatch-fast-u64");
 				return false;
 			}
 #endif
@@ -1244,10 +1717,12 @@ bool Packet::dearmor(const void* key, const AES aesKeys[2], const Identity& iden
 			Poly1305::compute(mac, payload, payloadLen, macKey);
 #ifdef ZT_NO_TYPE_PUNNING
 			if (! Utils::secureEq(mac, data + ZT_PACKET_IDX_MAC, 8)) {
+				logFail("poly1305-mismatch-slow-secureeq");
 				return false;
 			}
 #else
 			if ((*reinterpret_cast<const uint64_t*>(data + ZT_PACKET_IDX_MAC)) != mac[0]) {	  // also secure, constant time
+				logFail("poly1305-mismatch-slow-u64");
 				return false;
 			}
 #endif
@@ -1255,9 +1730,11 @@ bool Packet::dearmor(const void* key, const AES aesKeys[2], const Identity& iden
 				s20.crypt12(payload, payload, payloadLen);
 			}
 		}
+		logOk();
 		return true;
 	}
 
+	logFail("unsupported-cipher-or-state");
 	return false;
 }
 

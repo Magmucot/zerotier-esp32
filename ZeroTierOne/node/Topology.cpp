@@ -14,6 +14,10 @@
 #include "RuntimeEnvironment.hpp"
 #include "Switch.hpp"
 #include "Trace.hpp"
+#include <stdio.h>
+#ifndef ZT_ESP32_STEP45_DEBUG_KEYS
+#define ZT_ESP32_STEP45_DEBUG_KEYS 1
+#endif
 
 namespace ZeroTier {
 
@@ -40,6 +44,9 @@ Topology::Topology(const RuntimeEnvironment* renv, void* tPtr) : RR(renv), _numC
 {
 	uint8_t tmp[ZT_WORLD_MAX_SERIALIZED_LENGTH];
 	uint64_t idtmp[2];
+	bool cachedOk = false;
+	uint64_t cachedId = 0;
+	uint64_t cachedTs = 0;
 	idtmp[0] = 0;
 	idtmp[1] = 0;
 	int n = RR->node->stateObjectGet(tPtr, ZT_STATE_OBJECT_PLANET, idtmp, tmp, sizeof(tmp));
@@ -47,6 +54,9 @@ Topology::Topology(const RuntimeEnvironment* renv, void* tPtr) : RR(renv), _numC
 		try {
 			World cachedPlanet;
 			cachedPlanet.deserialize(Buffer<ZT_WORLD_MAX_SERIALIZED_LENGTH>(tmp, (unsigned int)n), 0);
+			cachedOk = true;
+			cachedId = cachedPlanet.id();
+			cachedTs = cachedPlanet.timestamp();
 			addWorld(tPtr, cachedPlanet, false);
 		}
 		catch (...) {
@@ -59,6 +69,15 @@ Topology::Topology(const RuntimeEnvironment* renv, void* tPtr) : RR(renv), _numC
 		defaultPlanet.deserialize(wtmp, 0);	  // throws on error, which would indicate a bad static variable up top
 	}
 	addWorld(tPtr, defaultPlanet, false);
+	printf("[ZT] planet load cachedLen=%d cachedOk=%d cachedId=%llu cachedTs=%llu defaultId=%llu defaultTs=%llu finalId=%llu finalTs=%llu\n",
+	       n,
+	       cachedOk ? 1 : 0,
+	       (unsigned long long)cachedId,
+	       (unsigned long long)cachedTs,
+	       (unsigned long long)defaultPlanet.id(),
+	       (unsigned long long)defaultPlanet.timestamp(),
+	       (unsigned long long)_planet.id(),
+	       (unsigned long long)_planet.timestamp());
 }
 
 Topology::~Topology()
@@ -74,14 +93,29 @@ Topology::~Topology()
 SharedPtr<Peer> Topology::addPeer(void* tPtr, const SharedPtr<Peer>& peer)
 {
 	SharedPtr<Peer> np;
+	SharedPtr<Peer> existing;
 	{
 		Mutex::Lock _l(_peers_m);
 		SharedPtr<Peer>& hp = _peers[peer->address()];
+		existing = hp;
 		if (! hp) {
 			hp = peer;
 		}
 		np = hp;
 	}
+#ifdef ZT_ESP32_STEP45_DEBUG_KEYS
+	if (peer->address().toInt() == 0xdb64858fedULL) {
+		printf("[ZT_STEP45] add_peer addr=0x%llx incoming=%p existing=%p final=%p reused=%u finalVProto=%u aesAll=%p aesIf=%p\n",
+		       (unsigned long long)peer->address().toInt(),
+		       (void*)peer.operator->(),
+		       (void*)(existing ? existing.operator->() : (Peer*)0),
+		       (void*)(np ? np.operator->() : (Peer*)0),
+		       (unsigned int)((existing && np == existing) ? 1 : 0),
+		       (unsigned int)np->remoteVersionProtocol(),
+		       (void*)np->aesKeys(),
+		       (void*)np->aesKeysIfSupported());
+	}
+#endif
 	return np;
 }
 
@@ -164,6 +198,11 @@ SharedPtr<Peer> Topology::getUpstreamPeer(const uint64_t nwid)
 			const SharedPtr<Peer>* p = _peers.get(*a);
 			if (p) {
 				const unsigned int q = (*p)->relayQuality(now);
+				const SharedPtr<Path> pp((*p)->getAppropriatePath(now, false));
+				printf("[ZT] upstream cand=0x%llx relayQ=%u hasPath=%d\n",
+				       (unsigned long long)(*a).toInt(),
+				       q,
+				       pp ? 1 : 0);
 				if (q <= bestq) {
 					bestq = q;
 					best = p;
@@ -171,6 +210,10 @@ SharedPtr<Peer> Topology::getUpstreamPeer(const uint64_t nwid)
 			}
 		}
 		if (best) {
+			printf("[ZT] upstream select=0x%llx q=%u nwid=0x%llx\n",
+			       (unsigned long long)(*best)->address().toInt(),
+			       bestq,
+			       (unsigned long long)nwid);
 			return *best;
 		}
 	}
@@ -486,6 +529,10 @@ void Topology::_memoizeUpstreams(void* tPtr)
 	}
 
 	std::sort(_upstreamAddresses.begin(), _upstreamAddresses.end());
+	printf("[ZT] upstream memoize count=%u\n", (unsigned int)_upstreamAddresses.size());
+	for (unsigned int i = 0; i < (unsigned int)_upstreamAddresses.size(); ++i) {
+		printf("[ZT] upstream[%u]=0x%llx\n", i, (unsigned long long)_upstreamAddresses[i].toInt());
+	}
 }
 
 void Topology::_savePeer(void* tPtr, const SharedPtr<Peer>& peer)

@@ -1,18 +1,92 @@
-FROM espressif/idf:v5.3
+FROM ubuntu:22.04
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends clangd vim curl && \
-    rm -rf /var/lib/apt/lists/*
+RUN sed -i \
+    -e 's|http://archive.ubuntu.com/ubuntu/|http://se.archive.ubuntu.com/ubuntu/|g' \
+    -e 's|http://security.ubuntu.com/ubuntu/|http://se.archive.ubuntu.com/ubuntu/|g' \
+    /etc/apt/sources.list
 
-RUN curl -fsSL https://claude.ai/install.sh | bash && \
-    ln -sf /root/.local/bin/claude /usr/local/bin/claude
+RUN apt-get update -o Acquire::Retries=5 && \
+    DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends  \
+    bear \
+    bison \
+    bubblewrap \
+    build-essential \
+    ca-certificates \
+    ccache \
+    check \
+    clang \
+    clang-format \
+    clang-tidy \
+    clang-tools \
+    clangd \
+    cmake \
+    cppcheck \
+    cscope \
+    curl \
+    dialog \
+    dnsmasq \
+    file \
+    gdb \
+    git \
+    git-lfs \
+    global \
+    gnupg \
+    gperf \
+    graphviz \
+    hping3 \
+    htop \
+    iproute2 \
+    iptables \
+    iputils-ping \
+    jq \
+    lcov \
+    less \
+    libbsd-dev \
+    libffi-dev \
+    libgtk-3-0 \
+    libncurses-dev \
+    libusb-1.0-0-dev \
+    libwebkit2gtk-4.1-0 \
+    make \
+    moreutils \
+    net-tools \
+    netcat-openbsd \
+    nftables \
+    ninja-build \
+    nodejs \
+    openssh-server \
+    pipx \
+    procps \
+    python3 \
+    python3-pip \
+    python3-pygments \
+    python3-scapy \
+    python3-setuptools \
+    python3-venv \
+    python3-wheel \
+    rclone \
+    ripgrep \
+    rsync \
+    ruby \
+    tcpdump \
+    tmux \
+    universal-ctags \
+    unzip \
+    vim \
+    wget \
+    xz-utils \
+    zip \
+	&& rm -rf /var/lib/apt/lists/*
 
-RUN echo 'HISTSIZE=1000' >> /root/.bashrc && \
-    echo 'HISTFILESIZE=2000' >> /root/.bashrc && \
-    echo 'PROMPT_COMMAND="history -a"' >> /root/.bashrc && \
-    echo 'export PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends nodejs && \
+    npm cache clean --force && \
+    rm -rf /root/.npm /var/lib/apt/lists/*
 
-RUN sed -i 's/# force_color_prompt=yes/force_color_prompt=yes/' /root/.bashrc && \
-    sed -i 's|\\u@\\h|\\n\\u@zt-dev|' /root/.bashrc
+RUN printf '\n# Dev-container SSH settings\nPermitRootLogin prohibit-password\nPasswordAuthentication no\nPubkeyAuthentication yes\n' >> /etc/ssh/sshd_config
 
+COPY docker-entrypoint.dev.sh /usr/local/bin/docker-entrypoint.dev.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.dev.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.dev.sh"]
 CMD ["sleep", "infinity"]

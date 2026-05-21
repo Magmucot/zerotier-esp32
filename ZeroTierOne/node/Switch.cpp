@@ -893,11 +893,18 @@ void Switch::removeNetworkQoSControlBlock(uint64_t nwid)
 void Switch::send(void* tPtr, Packet& packet, const bool encrypt, const uint64_t nwid, const int32_t flowId)
 {
 	const Address dest(packet.destination());
+	printf("[ZT] send enter verb=0x%02x dest=0x%llx encrypt=%d\n",
+	       (unsigned int)packet.verb(),
+	       (unsigned long long)dest.toInt(),
+	       encrypt ? 1 : 0);
 	if (dest == RR->identity.address()) {
 		return;
 	}
 	_recordOutgoingPacketMetrics(packet);
 	if (! _trySend(tPtr, packet, encrypt, nwid, flowId)) {
+		printf("[ZT] send queue verb=0x%02x dest=0x%llx reason=no-path\n",
+		       (unsigned int)packet.verb(),
+		       (unsigned long long)dest.toInt());
 		{
 			Mutex::Lock _l(_txQueue_m);
 			if (_txQueue.size() >= ZT_TX_QUEUE_SIZE) {
@@ -921,6 +928,8 @@ void Switch::requestWhois(void* tPtr, const int64_t now, const Address& addr)
 		Mutex::Lock _l(_lastSentWhoisRequest_m);
 		int64_t& last = _lastSentWhoisRequest[addr];
 		if ((now - last) < ZT_WHOIS_RETRY_DELAY) {
+			printf("[ZT] requestWhois suppressed addr=0x%llx retryDelay\n",
+			       (unsigned long long)addr.toInt());
 			return;
 		}
 		else {
@@ -933,14 +942,24 @@ void Switch::requestWhois(void* tPtr, const int64_t now, const Address& addr)
 		int32_t flowId = ZT_QOS_NO_FLOW;
 		Packet outp(upstream->address(), RR->identity.address(), Packet::VERB_WHOIS);
 		addr.appendTo(outp);
+		printf("[ZT] WHOIS TX build query=0x%llx pktDest=0x%llx pktSrc=0x%llx verb=0x%02x\n",
+		       (unsigned long long)addr.toInt(),
+		       (unsigned long long)outp.destination().toInt(),
+		       (unsigned long long)outp.source().toInt(),
+		       (unsigned int)outp.verb());
 		send(tPtr, outp, true, 0, flowId);
 		printf("[ZT] requestWhois for 0x%llx via upstream 0x%llx\n",
 		       (unsigned long long)addr.toInt(), (unsigned long long)upstream->address().toInt());
+	}
+	else {
+		printf("[ZT] requestWhois no-upstream-peer addr=0x%llx\n", (unsigned long long)addr.toInt());
 	}
 }
 
 void Switch::doAnythingWaitingForPeer(void* tPtr, const SharedPtr<Peer>& peer)
 {
+	printf("[ZT] doAnythingWaitingForPeer peer=0x%llx\n",
+	       (unsigned long long)peer->address().toInt());
 	{
 		Mutex::Lock _l(_lastSentWhoisRequest_m);
 		_lastSentWhoisRequest.erase(peer->address());
@@ -962,9 +981,13 @@ void Switch::doAnythingWaitingForPeer(void* tPtr, const SharedPtr<Peer>& peer)
 		for (std::list<TXQueueEntry>::iterator txi(_txQueue.begin()); txi != _txQueue.end();) {
 			if (txi->dest == peer->address()) {
 				if (_trySend(tPtr, txi->packet, txi->encrypt, txi->nwid, txi->flowId)) {
+					printf("[ZT] waitingTX retry dest=0x%llx result=sent\n",
+					       (unsigned long long)txi->dest.toInt());
 					_txQueue.erase(txi++);
 				}
 				else {
+					printf("[ZT] waitingTX retry dest=0x%llx result=still-blocked\n",
+					       (unsigned long long)txi->dest.toInt());
 					++txi;
 				}
 			}
@@ -1067,6 +1090,10 @@ bool Switch::_trySend(void* tPtr, Packet& packet, bool encrypt, const uint64_t n
 	const Address destination(packet.destination());
 
 	const SharedPtr<Peer> peer(RR->topology->getPeer(tPtr, destination));
+	printf("[ZT] _trySend enter verb=0x%02x dest=0x%llx peer=%p\n",
+	       (unsigned int)packet.verb(),
+	       (unsigned long long)destination.toInt(),
+	       (void*)peer.ptr());
 	if (peer) {
 		if ((peer->bondingPolicy() == ZT_BOND_POLICY_BROADCAST) && (packet.verb() == Packet::VERB_FRAME || packet.verb() == Packet::VERB_EXT_FRAME)) {
 			const SharedPtr<Peer> relay(RR->topology->getUpstreamPeer(nwid));
@@ -1099,11 +1126,24 @@ bool Switch::_trySend(void* tPtr, Packet& packet, bool encrypt, const uint64_t n
 			}
 		}
 	}
+	printf("[ZT] _trySend fail verb=0x%02x dest=0x%llx\n",
+	       (unsigned int)packet.verb(),
+	       (unsigned long long)destination.toInt());
 	return false;
 }
 
 void Switch::_sendViaSpecificPath(void* tPtr, SharedPtr<Peer> peer, SharedPtr<Path> viaPath, uint16_t userSpecifiedMtu, int64_t now, Packet& packet, bool encrypt, int32_t flowId)
 {
+	auto _zt_temp_dump_hex64 = [](const unsigned char* p, unsigned int n) {
+		const unsigned int m = (n > 64U) ? 64U : n;
+		for (unsigned int i = 0; i < m; ++i) {
+			printf("%02x", (unsigned int)p[i]);
+		}
+		if (n > m) {
+			printf("...");
+		}
+	};
+
 	unsigned int mtu = ZT_DEFAULT_PHYSMTU;
 	uint64_t trustedPathId = 0;
 	RR->topology->getOutboundPathInfo(viaPath->address(), mtu, trustedPathId);
@@ -1118,14 +1158,74 @@ void Switch::_sendViaSpecificPath(void* tPtr, SharedPtr<Peer> peer, SharedPtr<Pa
 		packet.setTrusted(trustedPathId);
 	}
 	else {
+		const bool ztTempWhois = (packet.verb() == Packet::VERB_WHOIS);
+		if (ztTempWhois) {
+			printf("[ZT_TEMP_WHOIS_DUMP] preArmor pktId=0x%llx src=0x%llx dst=0x%llx verb=0x%02x size=%u encrypted=%d hex=",
+			       (unsigned long long)packet.packetId(),
+			       (unsigned long long)packet.source().toInt(),
+			       (unsigned long long)packet.destination().toInt(),
+			       (unsigned int)packet.verb(),
+			       (unsigned int)packet.size(),
+			       packet.isEncrypted() ? 1 : 0);
+			_zt_temp_dump_hex64((const unsigned char*)packet.data(), (unsigned int)packet.size());
+			printf("\n");
+		}
+		printf("[ZT] send pre-armor verb=0x%02x pktId=0x%llx size=%u encrypted=%d chunk=%u\n",
+		       (unsigned int)packet.verb(),
+		       (unsigned long long)packet.packetId(),
+		       (unsigned int)packet.size(),
+		       packet.isEncrypted() ? 1 : 0,
+		       chunkSize);
 		if (! packet.isEncrypted()) {
+			if (packet.verb() == Packet::VERB_WHOIS) {
+				printf("[ZT_WHOIS_ARMOR] peer=0x%010llx hasAES=%d vProto=%u encrypt=%d\n",
+				       (unsigned long long)peer->address().toInt(),
+				       peer->aesKeysIfSupported() ? 1 : 0,
+				       peer->remoteVersionProtocol(),
+				       (int)encrypt);
+			}
 			packet.armor(peer->key(), encrypt, false, peer->aesKeysIfSupported(), peer->identity());
+		}
+		if (ztTempWhois) {
+			const unsigned int postVerbByte = (packet.size() > 27U) ? (((unsigned int)((const unsigned char*)packet.data())[27]) & 0x1fU) : 0U;
+			printf("[ZT_TEMP_WHOIS_DUMP] postArmor pktId=0x%llx dst=0x%llx size=%u encrypted=%d postVerbField=0x%02x note=post-armor-verb-may-not-be-meaningful hex=",
+			       (unsigned long long)packet.packetId(),
+			       (unsigned long long)packet.destination().toInt(),
+			       (unsigned int)packet.size(),
+			       packet.isEncrypted() ? 1 : 0,
+			       postVerbByte);
+			_zt_temp_dump_hex64((const unsigned char*)packet.data(), (unsigned int)packet.size());
+			printf("\n");
+		}
+		printf("[ZT] send post-armor verb=0x%02x pktId=0x%llx size=%u encrypted=%d chunk=%u\n",
+		       (unsigned int)packet.verb(),
+		       (unsigned long long)packet.packetId(),
+		       (unsigned int)packet.size(),
+		       packet.isEncrypted() ? 1 : 0,
+		       chunkSize);
+		printf("[ZT] send expectReply pktId=0x%llx\n", (unsigned long long)packet.packetId());
+		if (ztTempWhois) {
+			printf("[ZT_TEMP_WHOIS_DUMP] expectReply pktId=0x%llx\n", (unsigned long long)packet.packetId());
 		}
 		RR->node->expectReplyTo(packet.packetId());
 	}
 
 	peer->recordOutgoingPacket(viaPath, packet.packetId(), packet.payloadLength(), packet.verb(), flowId, now);
 
+	char pathAddr[64];
+	viaPath->address().toString(pathAddr);
+	printf("[ZT] path send verb=0x%02x ztDest=0x%llx ipport=%s chunk=%u\n",
+	       (unsigned int)packet.verb(),
+	       (unsigned long long)packet.destination().toInt(),
+	       pathAddr,
+	       chunkSize);
+	if (packet.verb() == Packet::VERB_WHOIS) {
+		printf("[ZT_TEMP_WHOIS_DUMP] pathSend pktId=0x%llx ztDst=0x%llx ipport=%s chunk=%u\n",
+		       (unsigned long long)packet.packetId(),
+		       (unsigned long long)packet.destination().toInt(),
+		       pathAddr,
+		       chunkSize);
+	}
 	if (viaPath->send(RR, tPtr, packet.data(), chunkSize, now)) {
 		if (chunkSize < packet.size()) {
 			// Too big for one packet, fragment the rest

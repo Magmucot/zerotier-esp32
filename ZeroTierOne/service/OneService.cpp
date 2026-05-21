@@ -41,6 +41,10 @@
 #include "../osdep/PortMapper.hpp"
 #include "../version.h"
 #include "OneService.hpp"
+#include "ZtRouteDebug.hpp"
+#include <atomic>
+#include <arpa/inet.h>
+#include "../node/MAC.hpp"
 
 #include <cpp-httplib/httplib.h>
 
@@ -401,7 +405,7 @@ class NetworkState {
 		_settings.allowManagedWhitelist.push_back(addr);
 	}
 
-	const ZT_VirtualNetworkConfig& config()
+	const ZT_VirtualNetworkConfig& config() const
 	{
 		return _config;
 	}
@@ -742,6 +746,639 @@ static void _moonToJson(nlohmann::json& mj, const World& world)
 	}
 	mj["roots"] = ra;
 	mj["waiting"] = false;
+}
+
+// Build a managed-route decision dump for a given network and target IPv4.
+// Returns plain-text suitable for CLI output or serial log.
+// nwid: network id (uint64_t)
+// targetIp: target IP as dotted-decimal string (e.g. "172.25.132.160")
+// ── Egress trace state (file-scoped, safe to access from tapFrameHandler) ─────
+static std::atomic<bool>    _g_egressTraceEnabled(false);
+static std::atomic<uint64_t> _g_egressTraceNwid(0);
+static std::atomic<uint32_t> _g_egressTraceTargetIp4(0); // NBO target IPv4
+static std::atomic<int64_t>  _g_egressTraceUntil(0);      // ms since epoch
+static std::atomic<int>      _g_egressTraceMarkerId(0);
+// Egress trace output goes to a bounded buffer flushed to a file.
+static Mutex _g_egressTraceMutex;
+static std::string _g_egressTraceLog;
+static const size_t ZT_EGRESS_TRACE_MAX_BYTES = 256 * 1024;
+
+// ── ARP table lookup: return MAC string "xx:xx:xx:xx:xx:xx" for an IP on a device ─
+// Returns "" if not found. Reads /proc/net/arp (Linux only; harmless no-op elsewhere.
+static std::string _arpLookup(const char* targetIp, const char* device)
+{
+    FILE* f = fopen("/proc/net/arp", "r");
+    if (!f) return "";
+    char line[256];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return ""; } // skip header
+    while (fgets(line, sizeof(line), f)) {
+        char addr[64] = {}, hw[16] = {}, flags[16] = {}, mac[32] = {}, mask[16] = {}, dev[64] = {};
+        if (sscanf(line, "%63s %15s %15s %31s %15s %63s", addr, hw, flags, mac, mask, dev) == 6) {
+            if (strcmp(addr, targetIp) == 0 &&
+                (device[0] == '\0' || strcmp(dev, device) == 0) &&
+                strcmp(mac, "00:00:00:00:00:00") != 0) {
+                fclose(f);
+                return std::string(mac);
+            }
+        }
+    }
+    fclose(f);
+    return "";
+}
+
+// Convert "xx:xx:xx:xx:xx:xx" mac string to uint64_t
+static uint64_t _macStrToU64(const char* s)
+{
+    unsigned int a,b,c,d,e,f;
+    if (sscanf(s, "%x:%x:%x:%x:%x:%x", &a,&b,&c,&d,&e,&f) != 6) return 0;
+    return ((uint64_t)a << 40)|((uint64_t)b << 32)|((uint64_t)c << 24)|
+           ((uint64_t)d << 16)|((uint64_t)e << 8)|(uint64_t)f;
+}
+
+// Format a uint64_t MAC as "xx:xx:xx:xx:xx:xx"
+static void _u64ToMacStr(uint64_t m, char out[18])
+{
+    OSUtils::ztsnprintf(out, 18, "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x",
+        (unsigned int)((m>>40)&0xff),(unsigned int)((m>>32)&0xff),
+        (unsigned int)((m>>24)&0xff),(unsigned int)((m>>16)&0xff),
+        (unsigned int)((m>> 8)&0xff),(unsigned int)(m&0xff));
+}
+
+// ── Route-decision dump — target-specific, structured sections ─────────────────
+// marker_id: one of ZtRouteDebugMarker values
+// nets: caller holds _nets_m; pl: caller must free
+static std::string _dumpManagedRouteDecision(
+    uint64_t nwid,
+    const char* targetIp,
+    int marker_id,
+    uint64_t localAddr,
+    const std::map<uint64_t, NetworkState>& nets,
+    const ZT_PeerList* pl)
+{
+    char tmp[256], macBuf[18];
+    char nwid_s[20], local_s[12];
+    const char* markerName = ZtRouteDebugMarkerName(marker_id);
+    OSUtils::ztsnprintf(nwid_s, sizeof(nwid_s), "%.16llx", (unsigned long long)nwid);
+    OSUtils::ztsnprintf(local_s, sizeof(local_s), "%.10llx", (unsigned long long)localAddr);
+
+    std::string out;
+    out.reserve(4096);
+
+    out += "[ZT_ROUTE_DECISION_BEGIN marker_id=";
+    out += std::to_string(marker_id);
+    out += " marker="; out += markerName;
+    out += " nwid=";   out += nwid_s;
+    out += " ip=";     out += targetIp;
+    out += "]\n";
+    out += "local_node="; out += local_s; out += "\n";
+
+    InetAddress targetAddr;
+    targetAddr.fromString(targetIp);
+
+    // ── [route_match] ───────────────────────────────────────────────────────────
+    out += "[route_match]\n";
+    out += "target_ip="; out += targetIp; out += "\n";
+
+    auto nit = nets.find(nwid);
+    if (nit == nets.end()) {
+        out += "network_found=no\n"
+               "network_status=unknown\n"
+               "matched_managed_route=none\n"
+               "egress_port=unknown\n"
+               "route_decision=not_matched\n"
+               "route_reason=network_not_found\n";
+        out += "[target_l2_resolution]\ntarget_ip="; out += targetIp; out += "\n"
+               "target_mac=unknown\ntarget_adi=unknown\n"
+               "resolution_source=unknown\nresolution_state=unresolved\n"
+               "resolution_reason=network_not_found\n";
+        out += "[target_member]\ntarget_member_node_id=unknown\n"
+               "target_member_source=unknown\nmember_known=no\n";
+        out += "[target_peer]\nany_peer_exists=unknown\ntarget_peer_exists=unknown\n"
+               "peer_visible_in_listpeers=unknown\npeer_role=unknown\n"
+               "peer_version=unknown\npeer_latency=unknown\n";
+        out += "[target_paths]\ntarget_path_count=0\ntarget_preferred_path=none\n"
+               "target_paths.empty=yes\n";
+        out += "[filter_rules]\nrules_present=unknown\nrules_count=unknown\n"
+               "capabilities_present=unknown\ntags_present=unknown\n"
+               "filter_eval_state=not_evaluated\nfilter_result=unknown\n"
+               "filter_reason=network_not_found\n";
+        out += "[send_decision]\nmatched_managed_route=none\nnetwork_ok=no\n"
+               "target_member_known=no\ntarget_peer_exists=unknown\n"
+               "target_path_exists=unknown\ntarget_preferred_path=none\n"
+               "decision_state=no_network\n"
+               "decision_reason=network_not_found_in_nets_map\n"
+               "drop_stage=route_match\ndrop_reason=network_not_found\n";
+        out += "[ZT_ROUTE_DECISION_END marker_id=";
+        out += std::to_string(marker_id);
+        out += " marker="; out += markerName; out += "]\n";
+        return out;
+    }
+
+    const NetworkState& ns = nit->second;
+    const ZT_VirtualNetworkConfig& cfg = ns.config();
+    const OneService::NetworkSettings& localSettings = ns.settings();
+
+    const char* nstatus = "unknown";
+    switch (cfg.status) {
+        case ZT_NETWORK_STATUS_REQUESTING_CONFIGURATION: nstatus="REQUESTING_CONFIGURATION"; break;
+        case ZT_NETWORK_STATUS_OK:                       nstatus="OK"; break;
+        case ZT_NETWORK_STATUS_ACCESS_DENIED:            nstatus="ACCESS_DENIED"; break;
+        case ZT_NETWORK_STATUS_NOT_FOUND:                nstatus="NOT_FOUND"; break;
+        case ZT_NETWORK_STATUS_PORT_ERROR:               nstatus="PORT_ERROR"; break;
+        case ZT_NETWORK_STATUS_CLIENT_TOO_OLD:           nstatus="CLIENT_TOO_OLD"; break;
+        case ZT_NETWORK_STATUS_AUTHENTICATION_REQUIRED:  nstatus="AUTHENTICATION_REQUIRED"; break;
+    }
+    const bool networkOk = (cfg.status == ZT_NETWORK_STATUS_OK);
+
+    std::string deviceName = "unknown";
+    if (ns.tap()) deviceName = ns.tap()->deviceName();
+
+    // Find matched managed route
+    std::string matchedRoute = "none";
+    for (unsigned int i = 0; i < cfg.routeCount; ++i) {
+        const InetAddress* rtgt = reinterpret_cast<const InetAddress*>(&cfg.routes[i].target);
+        if (matchedRoute == "none" && targetAddr.isV4() && rtgt->isV4()) {
+            if (rtgt->containsAddress(targetAddr)) {
+                matchedRoute = rtgt->toString(tmp);
+            }
+        }
+    }
+
+    out += "network_found=yes\n";
+    out += "network_status="; out += nstatus; out += "\n";
+    out += "matched_managed_route="; out += matchedRoute; out += "\n";
+    out += "egress_port="; out += deviceName; out += "\n";
+    if (!networkOk) {
+        out += "route_decision=not_matched\nroute_reason=network_not_ok\n";
+    } else if (matchedRoute == "none") {
+        out += "route_decision=not_matched\nroute_reason=no_managed_route_covers_target\n";
+    } else {
+        out += "route_decision=matched\nroute_reason=target_in_managed_subnet\n";
+    }
+
+    // ── [target_l2_resolution] ──────────────────────────────────────────────────
+    // Look up ARP table to find the MAC for the target IP on the ZT tap interface.
+    out += "[target_l2_resolution]\n";
+    out += "target_ip="; out += targetIp; out += "\n";
+
+    std::string arpMacStr = _arpLookup(targetIp, deviceName.c_str());
+    uint64_t targetMacU64 = 0;
+    uint64_t targetZtAddr = 0;
+
+    if (!arpMacStr.empty()) {
+        targetMacU64 = _macStrToU64(arpMacStr.c_str());
+        // Reverse-compute ZT address from MAC + nwid using MAC::toAddress()
+        ZeroTier::MAC ztMac(targetMacU64);
+        targetZtAddr = ztMac.toAddress(nwid).toInt();
+        _u64ToMacStr(targetMacU64, macBuf);
+        out += "target_mac="; out += macBuf; out += "\n";
+        OSUtils::ztsnprintf(tmp, sizeof(tmp), "%.10llx", (unsigned long long)targetZtAddr);
+        out += "target_adi="; out += tmp; out += "\n";
+        out += "resolution_source=arp_cache\n"
+               "resolution_state=resolved\n"
+               "resolution_reason=found_in_proc_net_arp\n";
+    } else {
+        _u64ToMacStr(cfg.mac, macBuf);
+        out += "target_mac=unknown\n"
+               "target_adi=unknown\n"
+               "resolution_source=unknown\n"
+               "resolution_state=unresolved\n"
+               "resolution_reason=not_in_arp_table_or_no_tap\n";
+    }
+
+    // ── [target_member] ─────────────────────────────────────────────────────────
+    out += "[target_member]\n";
+    if (targetZtAddr != 0) {
+        OSUtils::ztsnprintf(tmp, sizeof(tmp), "%.10llx", (unsigned long long)targetZtAddr);
+        out += "target_member_node_id="; out += tmp; out += "\n";
+        out += "target_member_source=arp_cache\nmember_known=yes\n";
+    } else {
+        out += "target_member_node_id=unknown\n"
+               "target_member_source=unknown\nmember_known=unknown\n";
+    }
+
+    // ── [target_peer] and [target_paths] ────────────────────────────────────────
+    out += "[target_peer]\n";
+
+    bool anyLeafPeer = false;
+    bool targetPeerFound = false;
+    const ZT_Peer* targetPeerPtr = nullptr;
+    if (pl) {
+        for (unsigned long i = 0; i < pl->peerCount; ++i) {
+            if (pl->peers[i].role == ZT_PEER_ROLE_LEAF) anyLeafPeer = true;
+            if (targetZtAddr != 0 && pl->peers[i].address == targetZtAddr) {
+                targetPeerFound = true;
+                targetPeerPtr = &pl->peers[i];
+            }
+        }
+    }
+    out += "any_peer_exists="; out += (anyLeafPeer ? "yes" : "no"); out += "\n";
+
+    if (targetZtAddr == 0) {
+        // Can't determine target peer without L2 resolution
+        out += "target_peer_exists=unknown\n"
+               "peer_visible_in_listpeers=unknown\n"
+               "peer_role=unknown\npeer_version=unknown\npeer_latency=unknown\n";
+    } else if (!targetPeerFound) {
+        out += "target_peer_exists=no\n"
+               "peer_visible_in_listpeers=no\n"
+               "peer_role=unknown\npeer_version=unknown\npeer_latency=unknown\n";
+    } else {
+        out += "target_peer_exists=yes\n"
+               "peer_visible_in_listpeers=yes\n";
+        const char* roleStr = "unknown";
+        switch (targetPeerPtr->role) {
+            case ZT_PEER_ROLE_LEAF:   roleStr = "LEAF"; break;
+            case ZT_PEER_ROLE_MOON:   roleStr = "MOON"; break;
+            case ZT_PEER_ROLE_PLANET: roleStr = "PLANET"; break;
+        }
+        out += "peer_role="; out += roleStr; out += "\n";
+        if (targetPeerPtr->versionMajor >= 0) {
+            OSUtils::ztsnprintf(tmp, sizeof(tmp), "%d.%d.%d",
+                targetPeerPtr->versionMajor, targetPeerPtr->versionMinor, targetPeerPtr->versionRev);
+            out += "peer_version="; out += tmp; out += "\n";
+        } else {
+            out += "peer_version=unknown\n";
+        }
+        if (targetPeerPtr->latency >= 0) {
+            out += "peer_latency="; out += std::to_string(targetPeerPtr->latency); out += "\n";
+        } else {
+            out += "peer_latency=unknown\n";
+        }
+    }
+
+    // ── [target_paths] ──────────────────────────────────────────────────────────
+    out += "[target_paths]\n";
+    unsigned int targetPathCount = 0;
+    std::string targetPreferredPath = "none";
+    int64_t lastSend = -1, lastRecv = -1;
+
+    if (targetPeerPtr) {
+        for (unsigned int j = 0; j < targetPeerPtr->pathCount; ++j) {
+            const InetAddress* pa = reinterpret_cast<const InetAddress*>(&targetPeerPtr->paths[j].address);
+            char addrBuf[128];
+            pa->toString(addrBuf);
+            OSUtils::ztsnprintf(tmp, sizeof(tmp), "target_path[%u].address=%s\n", j, addrBuf);
+            out += tmp;
+            OSUtils::ztsnprintf(tmp, sizeof(tmp), "target_path[%u].preferred=%s\n", j,
+                targetPeerPtr->paths[j].preferred ? "yes" : "no");
+            out += tmp;
+            OSUtils::ztsnprintf(tmp, sizeof(tmp), "target_path[%u].expired=%s\n", j,
+                targetPeerPtr->paths[j].expired ? "yes" : "no");
+            out += tmp;
+            if (targetPeerPtr->paths[j].lastSend > 0) {
+                OSUtils::ztsnprintf(tmp, sizeof(tmp), "target_path[%u].last_send=%llu\n", j,
+                    (unsigned long long)targetPeerPtr->paths[j].lastSend);
+                out += tmp;
+            } else {
+                OSUtils::ztsnprintf(tmp, sizeof(tmp), "target_path[%u].last_send=unknown\n", j);
+                out += tmp;
+            }
+            if (targetPeerPtr->paths[j].lastReceive > 0) {
+                OSUtils::ztsnprintf(tmp, sizeof(tmp), "target_path[%u].last_receive=%llu\n", j,
+                    (unsigned long long)targetPeerPtr->paths[j].lastReceive);
+                out += tmp;
+            } else {
+                OSUtils::ztsnprintf(tmp, sizeof(tmp), "target_path[%u].last_receive=unknown\n", j);
+                out += tmp;
+            }
+            if (targetPeerPtr->paths[j].preferred && targetPreferredPath == "none") {
+                targetPreferredPath = addrBuf;
+                if (targetPeerPtr->paths[j].lastSend > lastSend)
+                    lastSend = targetPeerPtr->paths[j].lastSend;
+                if (targetPeerPtr->paths[j].lastReceive > lastRecv)
+                    lastRecv = targetPeerPtr->paths[j].lastReceive;
+            }
+            if (!targetPeerPtr->paths[j].expired) ++targetPathCount;
+        }
+    }
+    out += "target_path_count="; out += std::to_string(targetPathCount); out += "\n";
+    out += "target_preferred_path="; out += targetPreferredPath; out += "\n";
+    out += "target_paths.empty="; out += (targetPathCount == 0 ? "yes" : "no"); out += "\n";
+
+    // ── [filter_rules] ──────────────────────────────────────────────────────────
+    out += "[filter_rules]\n";
+    // Filter rules are not exposed directly through ZT_VirtualNetworkConfig C API;
+    // we can report route and multicast group counts as proxy for network config richness.
+    OSUtils::ztsnprintf(tmp, sizeof(tmp), "%u", cfg.routeCount);
+    out += "managed_route_count="; out += tmp; out += "\n";
+    OSUtils::ztsnprintf(tmp, sizeof(tmp), "%u", cfg.multicastSubscriptionCount);
+    out += "multicast_group_count="; out += tmp; out += "\n";
+    // Filter state is evaluated at frame-send time; we report static config here.
+    out += "filter_eval_state=not_evaluated\n"
+           "filter_result=unknown\n"
+           "filter_reason=filter_evaluated_at_send_time_not_here\n";
+
+    // ── [send_decision] ─────────────────────────────────────────────────────────
+    out += "[send_decision]\n";
+    out += "matched_managed_route="; out += matchedRoute; out += "\n";
+    out += "network_ok="; out += (networkOk ? "yes" : "no"); out += "\n";
+    if (targetZtAddr == 0) {
+        out += "target_member_known=unknown\n";
+    } else {
+        out += "target_member_known=yes\n";
+    }
+    if (targetZtAddr == 0) {
+        out += "target_peer_exists=unknown\n";
+    } else {
+        out += "target_peer_exists="; out += (targetPeerFound ? "yes" : "no"); out += "\n";
+    }
+    out += "target_path_exists="; out += (targetPathCount > 0 ? "yes" : (targetPeerPtr ? "no" : "unknown")); out += "\n";
+    out += "target_preferred_path="; out += targetPreferredPath; out += "\n";
+
+    // Strict can_send rule: network OK + matched route + target member known + target peer + paths
+    const char* decisionState;
+    const char* decisionReason;
+    const char* dropStage;
+    const char* dropReason;
+
+    if (!networkOk) {
+        decisionState  = "network_not_ok";
+        decisionReason = "network_status_is_not_OK";
+        dropStage      = "route_match";
+        dropReason     = nstatus;
+    } else if (matchedRoute == "none") {
+        decisionState  = "no_managed_route";
+        decisionReason = "target_ip_not_in_any_managed_subnet";
+        dropStage      = "route_match";
+        dropReason     = "no_matching_route";
+    } else if (targetZtAddr == 0) {
+        decisionState  = "no_target_l2";
+        decisionReason = "target_mac_not_in_arp_cache_cannot_resolve_peer";
+        dropStage      = "l2_resolution";
+        dropReason     = "arp_miss";
+    } else if (!targetPeerFound) {
+        decisionState  = "no_target_peer";
+        decisionReason = "target_zt_address_not_in_peer_list";
+        dropStage      = "peer_lookup";
+        dropReason     = "peer_not_in_peer_table";
+    } else if (targetPathCount == 0) {
+        decisionState  = "no_target_path";
+        decisionReason = "target_peer_has_no_unexpired_paths";
+        dropStage      = "path_selection";
+        dropReason     = "all_paths_expired_or_none";
+    } else {
+        decisionState  = "can_send";
+        decisionReason = "network_ok_route_matched_target_peer_resolved_with_paths";
+        dropStage      = "none";
+        dropReason     = "none";
+    }
+    out += "decision_state="; out += decisionState; out += "\n";
+    out += "decision_reason="; out += decisionReason; out += "\n";
+    out += "drop_stage="; out += dropStage; out += "\n";
+    out += "drop_reason="; out += dropReason; out += "\n";
+
+    out += "[ZT_ROUTE_DECISION_END marker_id=";
+    out += std::to_string(marker_id);
+    out += " marker="; out += markerName; out += "]\n";
+    return out;
+}
+
+// ── Egress frame trace ─────────────────────────────────────────────────────────
+// Called from tapFrameHandler when tracing is enabled.
+// Output goes to _g_egressTraceLog (bounded buffer) and stderr.
+static void _appendEgressTrace(const std::string& entry)
+{
+    Mutex::Lock l(_g_egressTraceMutex);
+    if (_g_egressTraceLog.size() < ZT_EGRESS_TRACE_MAX_BYTES) {
+        _g_egressTraceLog += entry;
+    }
+    fprintf(stderr, "%s", entry.c_str());
+}
+
+static void _traceEgressFrame(
+    uint64_t nwid,
+    uint64_t srcMacU64, uint64_t dstMacU64,
+    unsigned int etherType, unsigned int vlanId,
+    const void* data, unsigned int len,
+    int marker_id,
+    const std::map<uint64_t, NetworkState>& nets,
+    const ZT_PeerList* pl)
+{
+    char tmp[512], macBuf[18];
+    const char* markerName = ZtRouteDebugMarkerName(marker_id);
+    char nwid_s[20];
+    OSUtils::ztsnprintf(nwid_s, sizeof(nwid_s), "%.16llx", (unsigned long long)nwid);
+
+    std::string out;
+    out.reserve(2048);
+
+    out += "[ZT_EGRESS_DECISION_BEGIN marker_id=";
+    out += std::to_string(marker_id);
+    out += " marker="; out += markerName;
+    out += " nwid="; out += nwid_s;
+    out += "]\n";
+
+    // ── [egress_frame] ──────────────────────────────────────────────────────────
+    out += "[egress_frame]\n";
+    out += "frame_seen=yes\n";
+    OSUtils::ztsnprintf(tmp, sizeof(tmp), "%u", len); out += "frame_len="; out += tmp; out += "\n";
+    OSUtils::ztsnprintf(tmp, sizeof(tmp), "0x%04x", etherType); out += "ethertype="; out += tmp; out += "\n";
+    const char* etName = "unknown";
+    if (etherType == 0x0806) etName = "ARP";
+    else if (etherType == 0x0800) etName = "IPv4";
+    else if (etherType == 0x86dd) etName = "IPv6";
+    out += "ethertype_name="; out += etName; out += "\n";
+    _u64ToMacStr(srcMacU64, macBuf); out += "src_mac="; out += macBuf; out += "\n";
+    _u64ToMacStr(dstMacU64, macBuf); out += "dst_mac="; out += macBuf; out += "\n";
+    const bool isBcast = (dstMacU64 == 0xffffffffffffULL);
+    const bool isMcast = (!isBcast && (dstMacU64 & 0x010000000000ULL));
+    out += "is_broadcast="; out += (isBcast ? "yes" : "no"); out += "\n";
+    out += "is_multicast="; out += (isMcast ? "yes" : "no"); out += "\n";
+    out += "is_unicast=";   out += (!isBcast && !isMcast ? "yes" : "no"); out += "\n";
+
+    const uint8_t* d = (const uint8_t*)data;
+    // ARP fields
+    if (etherType == 0x0806 && len >= 28) {
+        uint16_t arpOp = ((uint16_t)d[6] << 8) | d[7];
+        char sip[16], tip[16];
+        OSUtils::ztsnprintf(sip, sizeof(sip), "%u.%u.%u.%u", d[14],d[15],d[16],d[17]);
+        OSUtils::ztsnprintf(tip, sizeof(tip), "%u.%u.%u.%u", d[24],d[25],d[26],d[27]);
+        out += "arp_op="; out += (arpOp==1?"request":(arpOp==2?"reply":"unknown")); out += "\n";
+        out += "arp_sender_ip="; out += sip; out += "\n";
+        out += "arp_target_ip="; out += tip; out += "\n";
+    } else {
+        out += "arp_op=not_applicable\narp_sender_ip=not_applicable\narp_target_ip=not_applicable\n";
+    }
+    // IPv4 fields
+    if (etherType == 0x0800 && len >= 20) {
+        char sip[16], dip[16];
+        OSUtils::ztsnprintf(sip, sizeof(sip), "%u.%u.%u.%u", d[12],d[13],d[14],d[15]);
+        OSUtils::ztsnprintf(dip, sizeof(dip), "%u.%u.%u.%u", d[16],d[17],d[18],d[19]);
+        uint8_t proto = d[9];
+        const char* protoName = "unknown";
+        if (proto == 1) protoName = "icmp";
+        else if (proto == 6) protoName = "tcp";
+        else if (proto == 17) protoName = "udp";
+        out += "ipv4_src="; out += sip; out += "\n";
+        out += "ipv4_dst="; out += dip; out += "\n";
+        out += "ipv4_proto="; out += protoName; out += "\n";
+        unsigned int ihl = (d[0] & 0x0f) * 4;
+        if (proto == 1 && len >= ihl + 8) {
+            OSUtils::ztsnprintf(tmp, sizeof(tmp), "%u", d[ihl]);
+            out += "icmp_type="; out += tmp; out += "\n";
+            OSUtils::ztsnprintf(tmp, sizeof(tmp), "%u", d[ihl+1]);
+            out += "icmp_code="; out += tmp; out += "\n";
+        } else {
+            out += "icmp_type=not_applicable\nicmp_code=not_applicable\n";
+        }
+    } else if (etherType != 0x0806) {
+        out += "ipv4_src=not_applicable\nipv4_dst=not_applicable\n"
+               "ipv4_proto=not_applicable\nicmp_type=not_applicable\nicmp_code=not_applicable\n";
+    } else {
+        out += "ipv4_src=not_applicable\nipv4_dst=not_applicable\n"
+               "ipv4_proto=not_applicable\nicmp_type=not_applicable\nicmp_code=not_applicable\n";
+    }
+
+    // ── [egress_network] ────────────────────────────────────────────────────────
+    out += "[egress_network]\n";
+    out += "nwid="; out += nwid_s; out += "\n";
+    auto nit = nets.find(nwid);
+    if (nit != nets.end()) {
+        const ZT_VirtualNetworkConfig& cfg = nit->second.config();
+        const char* nstat = "unknown";
+        switch (cfg.status) {
+            case ZT_NETWORK_STATUS_OK: nstat="OK"; break;
+            case ZT_NETWORK_STATUS_ACCESS_DENIED: nstat="ACCESS_DENIED"; break;
+            case ZT_NETWORK_STATUS_REQUESTING_CONFIGURATION: nstat="REQUESTING_CONFIGURATION"; break;
+            default: break;
+        }
+        out += "network_status="; out += nstat; out += "\n";
+        out += "broadcast_enabled="; out += (cfg.broadcastEnabled ? "yes" : "no"); out += "\n";
+        out += "bridge="; out += (cfg.bridge ? "yes" : "no"); out += "\n";
+        if (nit->second.tap()) {
+            out += "port_device="; out += nit->second.tap()->deviceName(); out += "\n";
+        } else {
+            out += "port_device=unknown\n";
+        }
+    } else {
+        out += "network_status=unknown\nbroadcast_enabled=unknown\nbridge=unknown\nport_device=unknown\n";
+    }
+    out += "matched_managed_route=not_applicable\nroute_match_reason=egress_trace_no_route_check\n";
+
+    // ── [egress_destination] ────────────────────────────────────────────────────
+    out += "[egress_destination]\n";
+    const char* destType = isBcast ? "broadcast" : (isMcast ? "multicast" : "unicast");
+    out += "destination_type="; out += destType; out += "\n";
+    _u64ToMacStr(dstMacU64, macBuf);
+    out += "target_mac="; out += macBuf; out += "\n";
+
+    // Reverse MAC → ZT address
+    uint64_t dstZtAddr = 0;
+    if (!isBcast && !isMcast) {
+        ZeroTier::MAC dstMac(dstMacU64);
+        dstZtAddr = dstMac.toAddress(nwid).toInt();
+        OSUtils::ztsnprintf(tmp, sizeof(tmp), "%.10llx", (unsigned long long)dstZtAddr);
+        out += "target_adi="; out += tmp; out += "\n";
+        out += "target_member_node_id="; out += tmp; out += "\n";
+        out += "destination_resolution_state=resolved\n"
+               "destination_resolution_reason=mac_to_zt_address_computed\n";
+    } else {
+        out += "target_adi=not_applicable\ntarget_member_node_id=not_applicable\n";
+        out += "destination_resolution_state="; out += (isBcast ? "broadcast_fanout" : "multicast_fanout"); out += "\n";
+        out += "destination_resolution_reason=broadcast_or_multicast_mac\n";
+    }
+    out += "target_ip="; out += _g_egressTraceTargetIp4.load() ? "see_arp_target_ip" : "unknown"; out += "\n";
+
+    // ── [egress_peer_selection] ─────────────────────────────────────────────────
+    out += "[egress_peer_selection]\n";
+    bool dstPeerFound = false;
+    const ZT_Peer* dstPeer = nullptr;
+    unsigned int candidateCount = 0;
+    if (pl && dstZtAddr != 0) {
+        for (unsigned long i = 0; i < pl->peerCount; ++i) {
+            if (pl->peers[i].address == dstZtAddr) {
+                dstPeerFound = true;
+                dstPeer = &pl->peers[i];
+            }
+            if (pl->peers[i].role == ZT_PEER_ROLE_LEAF) {
+                OSUtils::ztsnprintf(tmp, sizeof(tmp),
+                    "candidate_member[%u].node_id=%.10llx\ncandidate_member[%u].source=peer_list\n",
+                    candidateCount, (unsigned long long)pl->peers[i].address, candidateCount);
+                if (candidateCount < 8) out += tmp; // cap at 8 to avoid huge output
+                ++candidateCount;
+            }
+        }
+    } else if (isBcast || isMcast) {
+        if (pl) {
+            for (unsigned long i = 0; i < pl->peerCount; ++i)
+                if (pl->peers[i].role == ZT_PEER_ROLE_LEAF) ++candidateCount;
+        }
+    }
+    OSUtils::ztsnprintf(tmp, sizeof(tmp), "%u", candidateCount);
+    out += "candidate_member_count="; out += tmp; out += "\n";
+    out += "target_peer_exists="; out += (!isBcast && !isMcast && dstZtAddr != 0 ? (dstPeerFound ? "yes" : "no") : "not_applicable"); out += "\n";
+
+    unsigned int dstPathCount = 0;
+    std::string dstPreferredPath = "none";
+    if (dstPeer) {
+        for (unsigned int j = 0; j < dstPeer->pathCount; ++j) {
+            if (!dstPeer->paths[j].expired) {
+                ++dstPathCount;
+                if (dstPeer->paths[j].preferred && dstPreferredPath == "none") {
+                    const InetAddress* pa = reinterpret_cast<const InetAddress*>(&dstPeer->paths[j].address);
+                    char ab[128]; pa->toString(ab);
+                    dstPreferredPath = ab;
+                }
+            }
+        }
+    }
+    OSUtils::ztsnprintf(tmp, sizeof(tmp), "%u", dstPathCount);
+    out += "target_path_count="; out += tmp; out += "\n";
+    out += "target_preferred_path="; out += dstPreferredPath; out += "\n";
+
+    // ── [egress_filter] ─────────────────────────────────────────────────────────
+    out += "[egress_filter]\n";
+    if (nit != nets.end()) {
+        const ZT_VirtualNetworkConfig& cfg = nit->second.config();
+        OSUtils::ztsnprintf(tmp, sizeof(tmp), "%u", cfg.routeCount);
+        out += "managed_route_count="; out += tmp; out += "\n";
+        OSUtils::ztsnprintf(tmp, sizeof(tmp), "%u", cfg.multicastSubscriptionCount);
+        out += "multicast_group_count="; out += tmp; out += "\n";
+    } else {
+        out += "managed_route_count=unknown\nmulticast_group_count=unknown\n";
+    }
+    out += "filter_evaluated=no\nfilter_result=unknown\nfilter_drop_reason=evaluated_by_zt_core\n";
+
+    // ── [egress_send_result] ────────────────────────────────────────────────────
+    out += "[egress_send_result]\n";
+    const char* sendMethod = "unknown";
+    const char* decState = "unknown";
+    const char* dropSt = "none";
+    const char* dropRsn = "none";
+    if (isBcast || isMcast) {
+        sendMethod = "broadcast_fanout";
+        decState   = "queued";
+    } else if (!dstPeerFound && dstZtAddr != 0) {
+        sendMethod = "none";
+        decState   = "dropped";
+        dropSt     = "peer_lookup";
+        dropRsn    = "destination_peer_not_in_peer_table";
+    } else if (dstPeerFound && dstPathCount == 0) {
+        sendMethod = "none";
+        decState   = "unresolved";
+        dropSt     = "path_selection";
+        dropRsn    = "no_active_paths_to_peer";
+    } else if (dstPeerFound && dstPathCount > 0) {
+        sendMethod = "direct";
+        decState   = "sent";
+    } else {
+        sendMethod = "unknown";
+        decState   = "unknown";
+    }
+    out += "send_attempted=yes\n";
+    out += "send_method="; out += sendMethod; out += "\n";
+    out += "packet_queued=not_traced\n"
+           "wire_send_called=not_traced\n";
+    out += "drop_stage="; out += dropSt; out += "\n";
+    out += "drop_reason="; out += dropRsn; out += "\n";
+    out += "decision_state="; out += decState; out += "\n";
+
+    out += "[ZT_EGRESS_DECISION_END marker_id=";
+    out += std::to_string(marker_id);
+    out += " marker="; out += markerName; out += "]\n";
+
+    _appendEgressTrace(out);
 }
 
 class OneServiceImpl;
@@ -2574,6 +3211,79 @@ class OneServiceImpl : public OneService {
 		_controlPlane.Get(metricsPath, metricsGet);
 		_controlPlaneV6.Get(metricsPath, metricsGet);
 
+		// Route-decision debug endpoint: GET /debug/routedecision/<nwid16>/<ipv4>/<marker>
+		std::string routeDebugPath = R"(/debug/routedecision/([0-9a-fA-F]{16})/([0-9.]+)/([0-9a-zA-Z_]+))";
+		auto routeDebugGet = [&](const httplib::Request& req, httplib::Response& res) {
+			uint64_t nwid = Utils::hexStrToU64(req.matches[1].str().c_str());
+			std::string ipStr  = req.matches[2].str();
+			std::string mrkStr = req.matches[3].str();
+			int marker_id = ZtRouteDebugMarkerResolve(mrkStr.c_str());
+			if (marker_id < 0) {
+				res.set_content("unknown marker\n", "text/plain");
+				res.status = 400;
+				return;
+			}
+			ZT_PeerList* pl = _node->peers();
+			std::string dump;
+			{
+				Mutex::Lock _l(_nets_m);
+				dump = _dumpManagedRouteDecision(nwid, ipStr.c_str(), marker_id, _node->address(), _nets, pl);
+			}
+			_node->freeQueryResult((void*)pl);
+			res.set_content(dump, "text/plain");
+		};
+		_controlPlane.Get(routeDebugPath, routeDebugGet);
+		_controlPlaneV6.Get(routeDebugPath, routeDebugGet);
+
+		// Egress-trace enable: POST /debug/egresstrace/<nwid16>/<ipv4>/<marker>/<seconds>
+		std::string egressEnablePath = R"(/debug/egresstrace/([0-9a-fA-F]{16})/([0-9.]+)/([0-9a-zA-Z_]+)/([0-9]+))";
+		auto egressEnablePost = [&](const httplib::Request& req, httplib::Response& res) {
+			uint64_t nwid   = Utils::hexStrToU64(req.matches[1].str().c_str());
+			std::string ipStr  = req.matches[2].str();
+			std::string mrkStr = req.matches[3].str();
+			int secs = std::stoi(req.matches[4].str());
+			int marker_id = ZtRouteDebugMarkerResolve(mrkStr.c_str());
+			if (marker_id < 0) { res.set_content("unknown marker\n", "text/plain"); res.status = 400; return; }
+			// Parse target IPv4 in NBO
+			struct in_addr ia4; uint32_t ip4_nbo = 0;
+			if (inet_pton(AF_INET, ipStr.c_str(), &ia4) == 1) ip4_nbo = ia4.s_addr;
+			{
+				Mutex::Lock l(_g_egressTraceMutex);
+				_g_egressTraceLog.clear();
+			}
+			_g_egressTraceNwid.store(nwid);
+			_g_egressTraceTargetIp4.store(ip4_nbo);
+			_g_egressTraceMarkerId.store(marker_id);
+			_g_egressTraceUntil.store((int64_t)(OSUtils::now() + (int64_t)secs * 1000LL));
+			_g_egressTraceEnabled.store(true, std::memory_order_release);
+			char msg[128];
+			OSUtils::ztsnprintf(msg, sizeof(msg), "egress trace enabled nwid=%.16llx ip=%s marker=%s secs=%d\n",
+			    (unsigned long long)nwid, ipStr.c_str(), ZtRouteDebugMarkerName(marker_id), secs);
+			res.set_content(msg, "text/plain");
+		};
+		_controlPlane.Post(egressEnablePath, egressEnablePost);
+		_controlPlaneV6.Post(egressEnablePath, egressEnablePost);
+
+		// Egress-trace disable: POST /debug/egresstrace/stop
+		auto egressStopPost = [&](const httplib::Request& req, httplib::Response& res) {
+			_g_egressTraceEnabled.store(false, std::memory_order_release);
+			res.set_content("egress trace stopped\n", "text/plain");
+		};
+		_controlPlane.Post("/debug/egresstrace/stop", egressStopPost);
+		_controlPlaneV6.Post("/debug/egresstrace/stop", egressStopPost);
+
+		// Egress-trace log retrieval: GET /debug/egresstrace/log
+		auto egressLogGet = [&](const httplib::Request& req, httplib::Response& res) {
+			std::string log;
+			{
+				Mutex::Lock l(_g_egressTraceMutex);
+				log = _g_egressTraceLog;
+			}
+			res.set_content(log.empty() ? "(no egress trace data)\n" : log, "text/plain");
+		};
+		_controlPlane.Get("/debug/egresstrace/log", egressLogGet);
+		_controlPlaneV6.Get("/debug/egresstrace/log", egressLogGet);
+
 		auto exceptionHandler = [&, setContent](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
 			auto provider = opentelemetry::trace::Provider::GetTracerProvider();
 			auto tracer = provider->GetTracer("http_control_plane");
@@ -4124,6 +4834,17 @@ class OneServiceImpl : public OneService {
 
 	inline void tapFrameHandler(uint64_t nwid, const MAC& from, const MAC& to, unsigned int etherType, unsigned int vlanId, const void* data, unsigned int len)
 	{
+		if (_g_egressTraceEnabled.load(std::memory_order_relaxed) &&
+		    _g_egressTraceNwid.load(std::memory_order_relaxed) == nwid &&
+		    OSUtils::now() < _g_egressTraceUntil.load(std::memory_order_relaxed)) {
+			ZT_PeerList* pl = _node->peers();
+			{
+				Mutex::Lock nl(_nets_m);
+				_traceEgressFrame(nwid, from.toInt(), to.toInt(), etherType, vlanId, data, len,
+				                  _g_egressTraceMarkerId.load(), _nets, pl);
+			}
+			if (pl) _node->freeQueryResult(pl);
+		}
 		_node->processVirtualNetworkFrame((void*)0, OSUtils::now(), nwid, from.toInt(), to.toInt(), etherType, vlanId, data, len, &_nextBackgroundTaskDeadline);
 	}
 

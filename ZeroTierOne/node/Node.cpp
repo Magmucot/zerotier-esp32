@@ -32,6 +32,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(ESP_PLATFORM)
+#if __has_include("esp_system.h")
+#include "esp_system.h"
+#endif
+#if __has_include("esp_heap_caps.h")
+#include "esp_heap_caps.h"
+#endif
+#if __has_include("esp_debug_helpers.h")
+#include "esp_debug_helpers.h"
+#endif
+#if __has_include("freertos/FreeRTOS.h")
+#include "freertos/FreeRTOS.h"
+#endif
+#if __has_include("freertos/task.h")
+#include "freertos/task.h"
+#endif
+#endif
+
 // FIXME: remove this suppression and actually fix warnings
 #ifdef __GNUC__
 #pragma GCC diagnostic ignored "-Wsign-compare"
@@ -70,29 +88,47 @@ Node::Node(void* uptr, void* tptr, const struct ZT_Node_Config* config, const st
 	memset(_expectingRepliesTo, 0, sizeof(_expectingRepliesTo));
 	memset(_lastIdentityVerification, 0, sizeof(_lastIdentityVerification));
 	memset((void*)(&_stats), 0, sizeof(_stats));
+	printf("[ZT_NODE_NEW_DBG] ctor begin\n");
 
 	uint64_t idtmp[2];
 	idtmp[0] = 0;
 	idtmp[1] = 0;
 	char tmp[2048];
 	int n = stateObjectGet(tptr, ZT_STATE_OBJECT_IDENTITY_SECRET, idtmp, tmp, sizeof(tmp) - 1);
+	printf("[ZT_NODE_NEW_DBG] id_sec state_get len=%d\n", n);
 	if (n > 0) {
 		tmp[n] = (char)0;
-		if (RR->identity.fromString(tmp)) {
+		printf("[ZT_NODE_NEW_DBG] id_sec fromString begin\n");
+		const bool fromStringOk = RR->identity.fromString(tmp);
+		printf("[ZT_NODE_NEW_DBG] id_sec fromString ok=%d\n", (int)fromStringOk);
+		if (fromStringOk) {
 			RR->identity.toString(false, RR->publicIdentityStr);
 			RR->identity.toString(true, RR->secretIdentityStr);
 		}
 		else {
+			printf("[ZT_NODE_NEW_DBG] throw invalid identity (fromString failed)\n");
 			throw ZT_EXCEPTION_INVALID_IDENTITY;
 		}
 
-		if (! RR->identity.locallyValidate()) {
+#if defined(ZT_ESP32_ALLOW_PROVISIONED_IDENTITY) && (ZT_ESP32_ALLOW_PROVISIONED_IDENTITY)
+		printf("[ZT_IDENTITY_POLICY] provisioned identity accepted without local PoW validation\n");
+		printf("[ZT_IDENTITY_POLICY] locallyValidate skipped because ZT_ESP32_ALLOW_PROVISIONED_IDENTITY=1\n");
+#else
+		printf("[ZT_NODE_NEW_DBG] id_sec locallyValidate begin\n");
+		const bool localValidateOk = RR->identity.locallyValidate();
+		printf("[ZT_NODE_NEW_DBG] id_sec locallyValidate ok=%d\n", (int)localValidateOk);
+		if (! localValidateOk) {
+			printf("[ZT_NODE_NEW_DBG] throw invalid identity (locallyValidate failed)\n");
 			throw ZT_EXCEPTION_INVALID_IDENTITY;
 		}
+#endif
 	}
 
 	if (n <= 0) {
+		printf("[ZT_NODE_NEW_DBG] no id_sec found, generating identity\n");
+		printf("[ZT_NODE_NEW_DBG] identity.generate begin\n");
 		RR->identity.generate();
+		printf("[ZT_NODE_NEW_DBG] identity.generate done\n");
 		RR->identity.toString(false, RR->publicIdentityStr);
 		RR->identity.toString(true, RR->secretIdentityStr);
 		idtmp[0] = RR->identity.address().toInt();
@@ -104,12 +140,19 @@ Node::Node(void* uptr, void* tptr, const struct ZT_Node_Config* config, const st
 		idtmp[0] = RR->identity.address().toInt();
 		idtmp[1] = 0;
 		n = stateObjectGet(tptr, ZT_STATE_OBJECT_IDENTITY_PUBLIC, idtmp, tmp, sizeof(tmp) - 1);
+		printf("[ZT_NODE_NEW_DBG] id_pub state_get len=%d\n", n);
 		if ((n > 0) && (n < (int)sizeof(RR->publicIdentityStr)) && (n < (int)sizeof(tmp))) {
 			if (memcmp(tmp, RR->publicIdentityStr, n)) {
+				printf("[ZT_NODE_NEW_DBG] id_pub mismatch -> rewriting stored public identity\n");
 				stateObjectPut(tptr, ZT_STATE_OBJECT_IDENTITY_PUBLIC, idtmp, RR->publicIdentityStr, (unsigned int)strlen(RR->publicIdentityStr));
+			} else {
+				printf("[ZT_NODE_NEW_DBG] id_pub matches derived public identity\n");
 			}
+		} else {
+			printf("[ZT_NODE_NEW_DBG] id_pub missing/invalid len=%d\n", n);
 		}
 	}
+	printf("[ZT_NODE_NEW_DBG] ctor identity-load done\n");
 
 	printf("[ZT-NODE] sizeof(Node)=%lu before malloc block\n", (unsigned long)sizeof(Node));
 	char* m = (char*)0;
@@ -923,6 +966,109 @@ void Node::ncSendError(uint64_t nwid, uint64_t requestPacketId, const Address& d
 
 extern "C" {
 
+static const char* zt_node_new_dbg_exception_name(const long exc)
+{
+	switch (exc) {
+		case 100: return "OUT_OF_BOUNDS";
+		case 101: return "OUT_OF_MEMORY";
+		case 102: return "PRIVATE_KEY_REQUIRED";
+		case 103: return "INVALID_ARGUMENT";
+		case 104: return "INVALID_IDENTITY";
+		case 200: return "INVALID_SERIALIZED_DATA_INVALID_TYPE";
+		case 201: return "INVALID_SERIALIZED_DATA_OVERFLOW";
+		case 202: return "INVALID_SERIALIZED_DATA_INVALID_CRYPTOGRAPHIC_TOKEN";
+		case 203: return "INVALID_SERIALIZED_DATA_BAD_ENCODING";
+		default: return "UNKNOWN_EXCEPTION_VALUE";
+	}
+}
+
+static unsigned long zt_dbg_free_heap_bytes()
+{
+#if defined(ESP_PLATFORM)
+#if __has_include("esp_system.h")
+	return (unsigned long)esp_get_free_heap_size();
+#endif
+#endif
+	return 0;
+}
+
+static unsigned long zt_dbg_largest_heap_bytes()
+{
+#if defined(ESP_PLATFORM)
+#if __has_include("esp_heap_caps.h")
+	return (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+#endif
+#endif
+	return 0;
+}
+
+static const char* zt_dbg_task_name()
+{
+#if defined(ESP_PLATFORM)
+#if __has_include("freertos/task.h")
+	TaskHandle_t self = xTaskGetCurrentTaskHandle();
+	if (self) {
+		const char* n = pcTaskGetName(self);
+		if (n) {
+			return n;
+		}
+	}
+#endif
+#endif
+	return "(unknown)";
+}
+
+static unsigned long zt_dbg_stack_hwm_words()
+{
+#if defined(ESP_PLATFORM)
+#if __has_include("freertos/task.h")
+	TaskHandle_t self = xTaskGetCurrentTaskHandle();
+	if (self) {
+		return (unsigned long)uxTaskGetStackHighWaterMark(self);
+	}
+#endif
+#endif
+	return 0;
+}
+
+static void zt_dbg_print_backtrace()
+{
+#if defined(ESP_PLATFORM)
+#if __has_include("esp_debug_helpers.h")
+	printf("[ZT_BACKTRACE] begin depth=32\n");
+	(void)esp_backtrace_print(32);
+	printf("[ZT_BACKTRACE] end\n");
+	return;
+#endif
+#endif
+	printf("[ZT_BACKTRACE] unavailable\n");
+}
+
+static void zt_dbg_log_exception_trace(const char* catchType, const bool hasValue, const long value, const char* mappedName)
+{
+	printf("[ZT_EXCEPTION_TRACE] catch=%s", catchType ? catchType : "(null)");
+	if (hasValue) {
+		printf(" value=%ld mapped=%s", value, mappedName ? mappedName : "UNKNOWN");
+	}
+	printf(" free=%lu largest=%lu task=%s stack_hwm_words=%lu\n",
+		   zt_dbg_free_heap_bytes(),
+		   zt_dbg_largest_heap_bytes(),
+		   zt_dbg_task_name(),
+		   zt_dbg_stack_hwm_words());
+	zt_dbg_print_backtrace();
+}
+
+static void zt_dbg_log_fatal_trace(const char* reason)
+{
+	printf("[ZT_FATAL_TRACE] reason=%s free=%lu largest=%lu task=%s stack_hwm_words=%lu\n",
+		   reason ? reason : "(null)",
+		   zt_dbg_free_heap_bytes(),
+		   zt_dbg_largest_heap_bytes(),
+		   zt_dbg_task_name(),
+		   zt_dbg_stack_hwm_words());
+	zt_dbg_print_backtrace();
+}
+
 enum ZT_ResultCode ZT_Node_new(ZT_Node** node, const struct ZT_Node_Config* config, void* uptr, void* tptr, const struct ZT_Node_Callbacks* callbacks, int64_t now)
 {
 	*node = (ZT_Node*)0;
@@ -932,12 +1078,32 @@ enum ZT_ResultCode ZT_Node_new(ZT_Node** node, const struct ZT_Node_Config* conf
 		return ZT_RESULT_OK;
 	}
 	catch (std::bad_alloc& exc) {
+		zt_dbg_log_exception_trace("std::bad_alloc", false, 0, "OUT_OF_MEMORY");
 		return ZT_RESULT_FATAL_ERROR_OUT_OF_MEMORY;
 	}
 	catch (std::runtime_error& exc) {
+		printf("[ZT_NODE_NEW_DBG] caught std::runtime_error what=%s\n", exc.what());
+		zt_dbg_log_exception_trace("std::runtime_error", false, 0, "DATA_STORE_FAILED");
 		return ZT_RESULT_FATAL_ERROR_DATA_STORE_FAILED;
 	}
+	catch (int exc) {
+		printf("[ZT_NODE_NEW_DBG] caught int exception value=%d name=%s\n", exc, zt_node_new_dbg_exception_name((long)exc));
+		zt_dbg_log_exception_trace("int", true, (long)exc, zt_node_new_dbg_exception_name((long)exc));
+		return ZT_RESULT_FATAL_ERROR_INTERNAL;
+	}
+	catch (unsigned int exc) {
+		printf("[ZT_NODE_NEW_DBG] caught unsigned int exception value=%u name=%s\n", exc, zt_node_new_dbg_exception_name((long)exc));
+		zt_dbg_log_exception_trace("unsigned int", true, (long)exc, zt_node_new_dbg_exception_name((long)exc));
+		return ZT_RESULT_FATAL_ERROR_INTERNAL;
+	}
+	catch (long exc) {
+		printf("[ZT_NODE_NEW_DBG] caught long exception value=%ld name=%s\n", exc, zt_node_new_dbg_exception_name(exc));
+		zt_dbg_log_exception_trace("long", true, exc, zt_node_new_dbg_exception_name(exc));
+		return ZT_RESULT_FATAL_ERROR_INTERNAL;
+	}
 	catch (...) {
+		printf("[ZT_NODE_NEW_DBG] caught unknown exception\n");
+		zt_dbg_log_fatal_trace("ZT_Node_new catch(...)");
 		return ZT_RESULT_FATAL_ERROR_INTERNAL;
 	}
 }

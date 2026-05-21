@@ -32,8 +32,39 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef ZT_ESP32_STEP45_DEBUG_KEYS
+#define ZT_ESP32_STEP45_DEBUG_KEYS 1
+#endif
 
 namespace ZeroTier {
+
+static const char* _zt_ip_node_name(uint64_t addr) {
+	if (addr == 0xd526b558a5ULL) return "ESP32-QEMU";
+	if (addr == 0x4c7d125767ULL) return "ZT-ALPINE-LINUX";
+	if (addr == 0x02f5c63563ULL) return "ZT-DEV-LINUX";
+	if (addr == 0x24a5a693a7ULL) return "MACBOOK";
+	if (addr == 0xf0d8f9eec2ULL) return "SDWAN";
+	return "unknown";
+}
+static const char* _zt_ip_managed_ip(uint64_t addr) {
+	if (addr == 0xd526b558a5ULL) return "172.25.204.197";
+	if (addr == 0x4c7d125767ULL) return "172.25.206.161";
+	if (addr == 0x02f5c63563ULL) return "172.25.22.191";
+	return "unknown";
+}
+
+#ifdef ZT_ESP32_STEP45_DEBUG_KEYS
+static uint64_t ztStep45Fingerprint(const void* p, unsigned int len)
+{
+	const uint8_t* b = reinterpret_cast<const uint8_t*>(p);
+	uint64_t h = 1469598103934665603ULL;
+	for (unsigned int i = 0; i < len; ++i) {
+		h ^= (uint64_t)b[i];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+#endif
 
 bool IncomingPacket::tryDecode(const RuntimeEnvironment* RR, void* tPtr, int32_t flowId)
 {
@@ -62,8 +93,68 @@ bool IncomingPacket::tryDecode(const RuntimeEnvironment* RR, void* tPtr, int32_t
 
 		const SharedPtr<Peer> peer(RR->topology->getPeer(tPtr, sourceAddress));
 		if (peer) {
-			if (! _authenticated) {
-				if (! dearmor(peer->key(), peer->aesKeys(), RR->identity)) {
+				if (! _authenticated) {
+					if (sourceAddress.toInt() == 0xdb64858fedULL) {
+						const unsigned char* k = peer->key();
+					bool keyNonZero = false;
+					for (unsigned int i = 0; i < ZT_SYMMETRIC_KEY_SIZE; ++i) {
+						if (k[i]) {
+							keyNonZero = true;
+							break;
+						}
+					}
+					const AES* aesAll = peer->aesKeys();
+					const AES* aesIfSupported = peer->aesKeysIfSupported();
+						printf("[ZT_PEER_KEY] stage=pre-dearmor src=0x%llx dst=0x%llx pktId=0x%llx cipher=%u size=%u fromController=1 peerExists=1 peerAddr=0x%llx keyNonZero=%u aesAllPtr=%p aesIfSupportedPtr=%p vProto=%u vMajor=%u vMinor=%u vRev=%u\n",
+					       (unsigned long long)sourceAddress.toInt(),
+					       (unsigned long long)destination().toInt(),
+					       (unsigned long long)packetId(),
+					       (unsigned int)c,
+					       (unsigned int)size(),
+					       (unsigned long long)peer->address().toInt(),
+					       (unsigned int)(keyNonZero ? 1 : 0),
+					       (void*)aesAll,
+					       (void*)aesIfSupported,
+					       (unsigned int)peer->remoteVersionProtocol(),
+					       (unsigned int)peer->remoteVersionMajor(),
+						       (unsigned int)peer->remoteVersionMinor(),
+						       (unsigned int)peer->remoteVersionRevision());
+#ifdef ZT_ESP32_STEP45_DEBUG_KEYS
+						printf("[ZT_STEP45] try_decode_peer src=0x%llx dst=0x%llx cipher=%u peer=%p peerAddr=0x%llx vProto=%u vMaj=%u vMin=%u vRev=%u keyPtr=%p keyFp=%016llx key16=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x aesAllPtr=%p aesAllFp=%016llx aesIfPtr=%p aesIfFp=%016llx\n",
+						       (unsigned long long)sourceAddress.toInt(),
+						       (unsigned long long)destination().toInt(),
+						       (unsigned int)c,
+						       (void*)peer.operator->(),
+						       (unsigned long long)peer->address().toInt(),
+						       (unsigned int)peer->remoteVersionProtocol(),
+						       (unsigned int)peer->remoteVersionMajor(),
+						       (unsigned int)peer->remoteVersionMinor(),
+						       (unsigned int)peer->remoteVersionRevision(),
+						       (const void*)k,
+						       (unsigned long long)ztStep45Fingerprint(k, ZT_SYMMETRIC_KEY_SIZE),
+						       k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], k[8], k[9], k[10], k[11], k[12], k[13], k[14], k[15],
+						       (void*)aesAll,
+						       (unsigned long long)ztStep45Fingerprint(aesAll, sizeof(AES) * 2U),
+						       (void*)aesIfSupported,
+						       (unsigned long long)(aesIfSupported ? ztStep45Fingerprint(aesIfSupported, sizeof(AES) * 2U) : 0ULL));
+#endif
+					}
+					const bool dearmorOk = dearmor(peer->key(), peer->aesKeys(), RR->identity);
+#ifdef ZT_ESP32_STEP45_DEBUG_KEYS
+					if (sourceAddress.toInt() == 0xdb64858fedULL) {
+						printf("[ZT_STEP45] post_dearmor src=0x%llx pktId=0x%llx peer=%p result=%u\n",
+						       (unsigned long long)sourceAddress.toInt(),
+						       (unsigned long long)packetId(),
+						       (void*)peer.operator->(),
+						       (unsigned int)(dearmorOk ? 1 : 0));
+					}
+#endif
+					if (! dearmorOk) {
+						printf("[ZT_DISPATCH_DROP] reason=dearmor-fail src=0x%llx pktId=0x%llx cipher=%u len=%u\n",
+						       (unsigned long long)sourceAddress.toInt(),
+						       (unsigned long long)packetId(),
+					       (unsigned int)c,
+					       (unsigned int)size());
 					RR->t->incomingPacketMessageAuthenticationFailure(tPtr, _path, packetId(), sourceAddress, hops(), "invalid MAC");
 					peer->recordIncomingInvalidPacket(_path);
 					return true;
@@ -71,12 +162,38 @@ bool IncomingPacket::tryDecode(const RuntimeEnvironment* RR, void* tPtr, int32_t
 			}
 
 			if (! uncompress()) {
+				printf("[ZT_DISPATCH_DROP] reason=uncompress-fail src=0x%llx pktId=0x%llx cipher=%u len=%u\n",
+				       (unsigned long long)sourceAddress.toInt(),
+				       (unsigned long long)packetId(),
+				       (unsigned int)c,
+				       (unsigned int)size());
 				RR->t->incomingPacketInvalid(tPtr, _path, packetId(), sourceAddress, hops(), Packet::VERB_NOP, "LZ4 decompression failed");
 				return true;
 			}
 
 			_authenticated = true;
 			const Packet::Verb v = verb();
+			const bool fromController = (sourceAddress.toInt() == 0xdb64858fedULL);
+			uint64_t inRePid = 0;
+			unsigned int inReVerb = 0;
+			if (v == Packet::VERB_OK) {
+				inReVerb = (unsigned int)(*this)[ZT_PROTO_VERB_OK_IDX_IN_RE_VERB];
+				inRePid = at<uint64_t>(ZT_PROTO_VERB_OK_IDX_IN_RE_PACKET_ID);
+			}
+			else if (v == Packet::VERB_ERROR) {
+				inReVerb = (unsigned int)(*this)[ZT_PROTO_VERB_ERROR_IDX_IN_RE_VERB];
+				inRePid = at<uint64_t>(ZT_PROTO_VERB_ERROR_IDX_IN_RE_PACKET_ID);
+			}
+			printf("[ZT_DISPATCH] src=0x%llx dst=0x%llx pktId=0x%llx verb=0x%02x payloadLen=%u size=%u fromController=%u inReVerb=0x%02x inRePid=0x%llx\n",
+			       (unsigned long long)sourceAddress.toInt(),
+			       (unsigned long long)destination().toInt(),
+			       (unsigned long long)packetId(),
+			       (unsigned int)v,
+			       (unsigned int)payloadLength(),
+			       (unsigned int)size(),
+			       (unsigned int)(fromController ? 1 : 0),
+			       (unsigned int)inReVerb,
+			       (unsigned long long)inRePid);
 
 			bool r = true;
 			switch (v) {
@@ -551,8 +668,18 @@ bool IncomingPacket::_doOK(const RuntimeEnvironment* RR, void* tPtr, const Share
 	const Packet::Verb inReVerb = (Packet::Verb)(*this)[ZT_PROTO_VERB_OK_IDX_IN_RE_VERB];
 	const uint64_t inRePacketId = at<uint64_t>(ZT_PROTO_VERB_OK_IDX_IN_RE_PACKET_ID);
 	uint64_t networkId = 0;
+	printf("[ZT] OK RX src=0x%llx inReVerb=0x%02x inRePid=0x%llx pktId=0x%llx payloadLen=%u\n",
+	       (unsigned long long)peer->address().toInt(),
+	       (unsigned int)inReVerb,
+	       (unsigned long long)inRePacketId,
+	       (unsigned long long)packetId(),
+	       (unsigned int)payloadLength());
 
 	if (! RR->node->expectingReplyTo(inRePacketId)) {
+		printf("[ZT] OK DROP unexpected-reply src=0x%llx inReVerb=0x%02x inRePid=0x%llx\n",
+		       (unsigned long long)peer->address().toInt(),
+		       (unsigned int)inReVerb,
+		       (unsigned long long)inRePacketId);
 		return true;
 	}
 
@@ -596,7 +723,20 @@ bool IncomingPacket::_doOK(const RuntimeEnvironment* RR, void* tPtr, const Share
 				_path->updateLatency((unsigned int)latency, RR->node->now());
 			}
 
-			peer->setRemoteVersion(vProto, vMajor, vMinor, vRevision);
+				peer->setRemoteVersion(vProto, vMajor, vMinor, vRevision);
+#ifdef ZT_ESP32_STEP45_DEBUG_KEYS
+				if (peer->address().toInt() == 0xdb64858fedULL) {
+					printf("[ZT_STEP45] set_remote_version peer=%p addr=0x%llx vProto=%u vMaj=%u vMin=%u vRev=%u aesAll=%p aesIf=%p\n",
+					       (void*)peer.operator->(),
+					       (unsigned long long)peer->address().toInt(),
+					       (unsigned int)vProto,
+					       (unsigned int)vMajor,
+					       (unsigned int)vMinor,
+					       (unsigned int)vRevision,
+					       (void*)peer->aesKeys(),
+					       (void*)peer->aesKeysIfSupported());
+				}
+#endif
 
 			if ((externalSurfaceAddress) && (hops() == 0)) {
 				RR->sa->iam(tPtr, peer->address(), _path->localSocket(), _path->address(), externalSurfaceAddress, RR->topology->isUpstream(peer->identity()), RR->node->now());
@@ -604,17 +744,65 @@ bool IncomingPacket::_doOK(const RuntimeEnvironment* RR, void* tPtr, const Share
 		} break;
 
 		case Packet::VERB_WHOIS:
+			printf("[ZT] OK WHOIS branch src=0x%llx upstream=%d\n",
+			       (unsigned long long)peer->address().toInt(),
+			       RR->topology->isUpstream(peer->identity()) ? 1 : 0);
 			if (RR->topology->isUpstream(peer->identity())) {
 				const Identity id(*this, ZT_PROTO_VERB_WHOIS__OK__IDX_IDENTITY);
+				printf("[ZT] OK WHOIS identity=0x%llx expectedController=0xdb64858fed\n",
+				       (unsigned long long)id.address().toInt());
 				printf("[ZT] WHOIS OK: controller 0x%llx added to topology\n",
 				       (unsigned long long)id.address().toInt());
-				RR->sw->doAnythingWaitingForPeer(tPtr, RR->topology->addPeer(tPtr, SharedPtr<Peer>(new Peer(RR, RR->identity, id))));
+				const bool isController = (id.address().toInt() == 0xdb64858fedULL);
+				SharedPtr<Peer> existing = RR->topology->getPeerNoCache(id.address());
+				SharedPtr<Peer> created(new Peer(RR, RR->identity, id));
+				if (isController) {
+					const unsigned char* ck = created->key();
+					bool ckeyNonZero = false;
+					for (unsigned int i = 0; i < ZT_SYMMETRIC_KEY_SIZE; ++i) {
+						if (ck[i]) {
+							ckeyNonZero = true;
+							break;
+						}
+					}
+					printf("[ZT_PEER_STATE] event=whois-ok-controller ctrl=0x%llx existingPeer=%u createdPeer=%u createdKeyNonZero=%u createdAesAllPtr=%p createdAesIfSupportedPtr=%p createdVProto=%u\n",
+					       (unsigned long long)id.address().toInt(),
+					       (unsigned int)(existing ? 1 : 0),
+					       (unsigned int)(created ? 1 : 0),
+					       (unsigned int)(ckeyNonZero ? 1 : 0),
+					       (void*)created->aesKeys(),
+					       (void*)created->aesKeysIfSupported(),
+					       (unsigned int)created->remoteVersionProtocol());
+				}
+				SharedPtr<Peer> added = RR->topology->addPeer(tPtr, created);
+				if (isController) {
+					printf("[ZT_PEER_STATE] event=topology-add-peer ctrl=0x%llx reusedExisting=%u finalPeerAddr=0x%llx finalVProto=%u finalAesAllPtr=%p finalAesIfSupportedPtr=%p\n",
+					       (unsigned long long)id.address().toInt(),
+					       (unsigned int)((existing && (added == existing)) ? 1 : 0),
+					       (unsigned long long)added->address().toInt(),
+					       (unsigned int)added->remoteVersionProtocol(),
+					       (void*)added->aesKeys(),
+					       (void*)added->aesKeysIfSupported());
+				}
+				RR->sw->doAnythingWaitingForPeer(tPtr, added);
+			}
+			else {
+				printf("[ZT] OK WHOIS REJECT non-upstream src=0x%llx\n",
+				       (unsigned long long)peer->address().toInt());
 			}
 			break;
 
 		case Packet::VERB_NETWORK_CONFIG_REQUEST: {
 			networkId = at<uint64_t>(ZT_PROTO_VERB_OK_IDX_PAYLOAD);
 			const SharedPtr<Network> network(RR->node->network(networkId));
+			printf("[ZT_NETCONF_RX] path=OK_TO_NETWORK_CONFIG_REQUEST src=0x%llx inRePid=0x%llx pktId=0x%llx nwid=0x%llx payloadLen=%u offset=%u network=%d\n",
+			       (unsigned long long)peer->address().toInt(),
+			       (unsigned long long)inRePacketId,
+			       (unsigned long long)packetId(),
+			       (unsigned long long)networkId,
+			       (unsigned int)payloadLength(),
+			       (unsigned int)ZT_PROTO_VERB_OK_IDX_PAYLOAD,
+			       network ? 1 : 0);
 			if (network) {
 				network->handleConfigChunk(tPtr, packetId(), source(), *this, ZT_PROTO_VERB_OK_IDX_PAYLOAD);
 			}
@@ -625,8 +813,41 @@ bool IncomingPacket::_doOK(const RuntimeEnvironment* RR, void* tPtr, const Share
 			const SharedPtr<Network> network(RR->node->network(networkId));
 			if (network) {
 				const MulticastGroup mg(MAC(field(ZT_PROTO_VERB_MULTICAST_GATHER__OK__IDX_MAC, 6), 6), at<uint32_t>(ZT_PROTO_VERB_MULTICAST_GATHER__OK__IDX_ADI));
+				const unsigned int totalKnown = at<uint32_t>(ZT_PROTO_VERB_MULTICAST_GATHER__OK__IDX_GATHER_RESULTS);
 				const unsigned int count = at<uint16_t>(ZT_PROTO_VERB_MULTICAST_GATHER__OK__IDX_GATHER_RESULTS + 4);
-				RR->mc->addMultiple(tPtr, RR->node->now(), networkId, mg, field(ZT_PROTO_VERB_MULTICAST_GATHER__OK__IDX_GATHER_RESULTS + 6, count * 5), count, at<uint32_t>(ZT_PROTO_VERB_MULTICAST_GATHER__OK__IDX_GATHER_RESULTS));
+				char mac_str[24];
+				const uint8_t* macb = (const uint8_t*)field(ZT_PROTO_VERB_MULTICAST_GATHER__OK__IDX_MAC, 6);
+				snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+				         macb[0],macb[1],macb[2],macb[3],macb[4],macb[5]);
+				const uint64_t self_addr = RR->identity.address().toInt();
+				const uint64_t src_addr = peer->address().toInt();
+				const uint32_t adi_val = mg.adi();
+				printf("[ZT_GATHER_OK] node_name=%s node_id=0x%llx zt_managed_ip=%s nwid=0x%llx event=GATHER_OK src=0x%llx src_name=%s mac=%s adi=%u adi_hex=0x%08x group_key=%s/%u totalKnown=%u count=%u payloadLen=%u source=planet\n",
+				       _zt_ip_node_name(self_addr),
+				       (unsigned long long)self_addr,
+				       _zt_ip_managed_ip(self_addr),
+				       (unsigned long long)networkId,
+				       (unsigned long long)src_addr,
+				       _zt_ip_node_name(src_addr),
+				       mac_str, (unsigned)adi_val, (unsigned)adi_val,
+				       mac_str, (unsigned)adi_val,
+				       totalKnown, count, (unsigned int)payloadLength());
+				const uint8_t* peers_data = (const uint8_t*)field(ZT_PROTO_VERB_MULTICAST_GATHER__OK__IDX_GATHER_RESULTS + 6, count * 5);
+				bool inc_esp32 = false, inc_alpine = false, inc_devlinux = false;
+				for (unsigned int gi = 0; gi < count && gi < 8; ++gi) {
+					uint64_t ztaddr = 0;
+					for (int b = 0; b < 5; ++b) ztaddr = (ztaddr << 8) | peers_data[gi*5+b];
+					if (ztaddr == 0xd526b558a5ULL) inc_esp32 = true;
+					if (ztaddr == 0x4c7d125767ULL) inc_alpine = true;
+					if (ztaddr == 0x02f5c63563ULL) inc_devlinux = true;
+					printf("[ZT_GATHER_OK] member[%u]=0x%llx member_name=%s\n",
+					       gi, (unsigned long long)ztaddr, _zt_ip_node_name(ztaddr));
+				}
+				printf("[ZT_GATHER_OK] includes_esp32_qemu_d526b558a5=%s includes_zt_alpine_linux_4c7d125767=%s includes_zt_dev_linux_02f5c63563=%s\n",
+				       inc_esp32 ? "yes" : "no",
+				       inc_alpine ? "yes" : "no",
+				       inc_devlinux ? "yes" : "no");
+				RR->mc->addMultiple(tPtr, RR->node->now(), networkId, mg, field(ZT_PROTO_VERB_MULTICAST_GATHER__OK__IDX_GATHER_RESULTS + 6, count * 5), count, totalKnown);
 			}
 		} break;
 
@@ -713,15 +934,32 @@ bool IncomingPacket::_doRENDEZVOUS(const RuntimeEnvironment* RR, void* tPtr, con
 	Metrics::pkt_rendezvous_in++;
 	if (RR->topology->isUpstream(peer->identity())) {
 		const Address with(field(ZT_PROTO_VERB_RENDEZVOUS_IDX_ZTADDRESS, ZT_ADDRESS_LENGTH), ZT_ADDRESS_LENGTH);
+		const unsigned int rdv_port = at<uint16_t>(ZT_PROTO_VERB_RENDEZVOUS_IDX_PORT);
+		const unsigned int rdv_addrlen = (*this)[ZT_PROTO_VERB_RENDEZVOUS_IDX_ADDRLEN];
+		char rdv_ipbuf[64] = "?";
+		if ((rdv_addrlen == 4) || (rdv_addrlen == 16)) {
+			InetAddress rdv_addr(field(ZT_PROTO_VERB_RENDEZVOUS_IDX_ADDRESS, rdv_addrlen), rdv_addrlen, rdv_port);
+			rdv_addr.toIpString(rdv_ipbuf);
+		}
 		const SharedPtr<Peer> rendezvousWith(RR->topology->getPeer(tPtr, with));
+		printf("[ZT_RENDEZVOUS] src=0x%llx peer_zt=0x%llx suggested_ip=%s port=%u addrlen=%u peer_known=%d upstream=%d payloadLen=%u\n",
+		       (unsigned long long)peer->address().toInt(),
+		       (unsigned long long)with.toInt(),
+		       rdv_ipbuf, rdv_port, rdv_addrlen,
+		       rendezvousWith ? 1 : 0,
+		       RR->topology->isUpstream(peer->identity()) ? 1 : 0,
+		       (unsigned int)payloadLength());
 		if (rendezvousWith) {
-			const unsigned int port = at<uint16_t>(ZT_PROTO_VERB_RENDEZVOUS_IDX_PORT);
-			const unsigned int addrlen = (*this)[ZT_PROTO_VERB_RENDEZVOUS_IDX_ADDRLEN];
-			if ((port > 0) && ((addrlen == 4) || (addrlen == 16))) {
-				InetAddress atAddr(field(ZT_PROTO_VERB_RENDEZVOUS_IDX_ADDRESS, addrlen), addrlen, port);
-				if (RR->node->shouldUsePathForZeroTierTraffic(tPtr, with, _path->localSocket(), atAddr)) {
+			if ((rdv_port > 0) && ((rdv_addrlen == 4) || (rdv_addrlen == 16))) {
+				InetAddress atAddr(field(ZT_PROTO_VERB_RENDEZVOUS_IDX_ADDRESS, rdv_addrlen), rdv_addrlen, rdv_port);
+				const bool usePath = RR->node->shouldUsePathForZeroTierTraffic(tPtr, with, _path->localSocket(), atAddr);
+				char atbuf[64]; atAddr.toString(atbuf);
+				printf("[ZT_RENDEZVOUS] action=%s peer_zt=0x%llx atAddr=%s\n",
+				       usePath ? "attemptContact" : "pathRejected",
+				       (unsigned long long)with.toInt(), atbuf);
+				if (usePath) {
 					const uint64_t junk = RR->node->prng();
-					RR->node->putPacket(tPtr, _path->localSocket(), atAddr, &junk, 4, 2);	// send low-TTL junk packet to 'open' local NAT(s) and stateful firewalls
+					RR->node->putPacket(tPtr, _path->localSocket(), atAddr, &junk, 4, 2);
 					rendezvousWith->attemptToContactAt(tPtr, _path->localSocket(), atAddr, RR->node->now(), false);
 				}
 			}
@@ -1241,6 +1479,13 @@ bool IncomingPacket::_doNETWORK_CONFIG(const RuntimeEnvironment* RR, void* tPtr,
 {
 	Metrics::pkt_network_config_in++;
 	const SharedPtr<Network> network(RR->node->network(at<uint64_t>(ZT_PACKET_IDX_PAYLOAD)));
+	printf("[ZT_NETCONF_RX] path=DIRECT_NETWORK_CONFIG src=0x%llx pktId=0x%llx nwid=0x%llx payloadLen=%u offset=%u network=%d\n",
+	       (unsigned long long)peer->address().toInt(),
+	       (unsigned long long)packetId(),
+	       (unsigned long long)at<uint64_t>(ZT_PACKET_IDX_PAYLOAD),
+	       (unsigned int)payloadLength(),
+	       (unsigned int)ZT_PACKET_IDX_PAYLOAD,
+	       network ? 1 : 0);
 	if (network) {
 		const uint64_t configUpdateId = network->handleConfigChunk(tPtr, packetId(), source(), *this, ZT_PACKET_IDX_PAYLOAD);
 		if (configUpdateId) {
@@ -1430,6 +1675,9 @@ bool IncomingPacket::_doPUSH_DIRECT_PATHS(const RuntimeEnvironment* RR, void* tP
 
 	unsigned int count = at<uint16_t>(ZT_PACKET_IDX_PAYLOAD);
 	unsigned int ptr = ZT_PACKET_IDX_PAYLOAD + 2;
+	printf("[ZT_PUSH_DIRECT_PATHS] src=0x%llx total_paths=%u payloadLen=%u\n",
+	       (unsigned long long)peer->address().toInt(),
+	       count, (unsigned int)payloadLength());
 
 	while (count--) {	// if ptr overflows Buffer will throw
 		unsigned int flags = (*this)[ptr++];
@@ -1442,6 +1690,8 @@ bool IncomingPacket::_doPUSH_DIRECT_PATHS(const RuntimeEnvironment* RR, void* tP
 		switch (addrType) {
 			case 4: {
 				const InetAddress a(field(ptr, 4), 4, at<uint16_t>(ptr + 4));
+				char pbuf[64]; a.toString(pbuf);
+				printf("[ZT_PUSH_DIRECT_PATHS] path_v4=%s flags=0x%02x\n", pbuf, flags);
 				if (((flags & ZT_PUSH_DIRECT_PATHS_FLAG_FORGET_PATH) == 0) &&												  // not being told to forget
 					(! (((flags & ZT_PUSH_DIRECT_PATHS_FLAG_CLUSTER_REDIRECT) == 0) && (peer->hasActivePathTo(now, a)))) &&	  // not already known
 					(RR->node->shouldUsePathForZeroTierTraffic(tPtr, peer->address(), _path->localSocket(), a)))			  // should use path
@@ -1456,6 +1706,8 @@ bool IncomingPacket::_doPUSH_DIRECT_PATHS(const RuntimeEnvironment* RR, void* tP
 			} break;
 			case 6: {
 				const InetAddress a(field(ptr, 16), 16, at<uint16_t>(ptr + 16));
+				char pbuf[64]; a.toString(pbuf);
+				printf("[ZT_PUSH_DIRECT_PATHS] path_v6=%s flags=0x%02x\n", pbuf, flags);
 				if (((flags & ZT_PUSH_DIRECT_PATHS_FLAG_FORGET_PATH) == 0) &&												  // not being told to forget
 					(! (((flags & ZT_PUSH_DIRECT_PATHS_FLAG_CLUSTER_REDIRECT) == 0) && (peer->hasActivePathTo(now, a)))) &&	  // not already known
 					(RR->node->shouldUsePathForZeroTierTraffic(tPtr, peer->address(), _path->localSocket(), a)))			  // should use path

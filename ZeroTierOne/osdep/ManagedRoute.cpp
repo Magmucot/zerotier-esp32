@@ -49,6 +49,9 @@
 #include "ExtOsdep.hpp"
 #include "LinuxNetLink.hpp"
 #endif
+#ifdef ESP_PLATFORM
+#include "ESP32NetLink.hpp"
+#endif
 
 #define ZT_BSD_ROUTE_CMD "/sbin/route"
 
@@ -303,6 +306,13 @@ static void _routeCmd(const char* op, const InetAddress& target, const InetAddre
 // This has been replaced by LinuxNetLink
 
 #endif	 // __LINUX__ ----------------------------------------------------------
+
+#ifdef ESP_PLATFORM  // ---------------------------------------------------------
+#define ZT_ROUTING_SUPPORT_FOUND 1
+
+// ESP32 route management is implemented via ESP32NetLink in sync()/remove().
+
+#endif  // ESP_PLATFORM --------------------------------------------------------
 
 #ifdef __WINDOWS__	 // --------------------------------------------------------
 #define ZT_ROUTING_SUPPORT_FOUND 1
@@ -582,6 +592,19 @@ bool ManagedRoute::sync()
 
 #endif	 // __LINUX__ ----------------------------------------------------------
 
+#ifdef ESP_PLATFORM  // ---------------------------------------------------------
+
+	if ((leftt) && (! ESP32NetLink::getInstance().routeIsSet(leftt, _via, _src, _device))) {
+		_applied[leftt] = false;
+		ESP32NetLink::getInstance().addRoute(leftt, _via, _src, _device);
+	}
+	if ((rightt) && (! ESP32NetLink::getInstance().routeIsSet(rightt, _via, _src, _device))) {
+		_applied[rightt] = false;
+		ESP32NetLink::getInstance().addRoute(rightt, _via, _src, _device);
+	}
+
+#endif	 // ESP_PLATFORM --------------------------------------------------------
+
 #ifdef __WINDOWS__	 // --------------------------------------------------------
 
 	if ((! _applied.count(leftt)) || (! _winHasRoute(interfaceLuid, interfaceIndex, leftt, _via))) {
@@ -636,6 +659,10 @@ void ManagedRoute::remove()
 		LinuxNetLink::getInstance().delRoute(r->first, _via, _src, (_via) ? (const char*)0 : _device);
 #endif	 // ZT_EXTOSDEP
 #endif	 // __LINUX__ ----------------------------------------------------------
+
+#ifdef ESP_PLATFORM  // ---------------------------------------------------------
+		ESP32NetLink::getInstance().delRoute(r->first, _via, _src, (_via) ? (const char*)0 : _device);
+#endif	 // ESP_PLATFORM --------------------------------------------------------
 
 #ifdef __WINDOWS__	 // --------------------------------------------------------
 		_winRoute(true, interfaceLuid, interfaceIndex, r->first, _via);

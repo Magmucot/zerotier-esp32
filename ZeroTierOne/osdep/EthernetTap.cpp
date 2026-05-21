@@ -33,6 +33,10 @@
 #include "LinuxEthernetTap.hpp"
 #endif	 // __LINUX__
 
+#ifdef ESP_PLATFORM
+#include "ESP32EthernetTap.hpp"
+#endif	 // ESP_PLATFORM
+
 #ifdef __WINDOWS__
 #include "WindowsEthernetTap.hpp"
 #endif	 // __WINDOWS__
@@ -98,6 +102,13 @@ std::shared_ptr<EthernetTap> EthernetTap::newInstance(
 	return std::shared_ptr<EthernetTap>(new LinuxEthernetTap(homePath, concurrency, pinning, mac, mtu, metric, nwid, friendlyName, handler, arg));
 #endif	 // ZT_EXTOSDEP
 #endif	 // __LINUX__
+
+#ifdef ESP_PLATFORM
+	(void)tapDeviceType;
+	(void)concurrency;
+	(void)pinning;
+	return std::shared_ptr<EthernetTap>(new ESP32EthernetTap(homePath, mac, mtu, metric, nwid, friendlyName, handler, arg));
+#endif	 // ESP_PLATFORM
 
 #ifdef __WINDOWS__
 	HRESULT hres = CoInitializeEx(0, COINIT_MULTITHREADED);

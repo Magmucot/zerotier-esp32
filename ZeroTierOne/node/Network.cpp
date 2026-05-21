@@ -26,13 +26,48 @@
 #include "Trace.hpp"
 
 #include <math.h>
+#include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
+
+#ifndef ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+#define ZT_ESP32_STEP52_NETCONF_APPLY_TRACE 0
+#endif
+#ifndef ZT_ESP32_STEP53_POST_ASSEMBLY_BRANCH_TRACE
+#define ZT_ESP32_STEP53_POST_ASSEMBLY_BRANCH_TRACE 1
+#endif
+#ifndef ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE
+#define ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE 1
+#endif
+#ifndef ZT_ESP32_STEP55_NETCONF_ALLOC_FIX
+#define ZT_ESP32_STEP55_NETCONF_ALLOC_FIX 0
+#endif
 
 namespace ZeroTier {
 
 namespace {
+
+static const char* _zt_net_node_name(uint64_t addr) {
+	if (addr == 0xd526b558a5ULL) return "ESP32-QEMU";
+	if (addr == 0x4c7d125767ULL) return "ZT-ALPINE-LINUX";
+	if (addr == 0x02f5c63563ULL) return "ZT-DEV-LINUX";
+	if (addr == 0x24a5a693a7ULL) return "MACBOOK";
+	if (addr == 0xf0d8f9eec2ULL) return "SDWAN";
+	return "unknown";
+}
+static const char* _zt_net_managed_ip(uint64_t addr) {
+	if (addr == 0xd526b558a5ULL) return "172.25.204.197";
+	if (addr == 0x4c7d125767ULL) return "172.25.206.161";
+	if (addr == 0x02f5c63563ULL) return "172.25.22.191";
+	return "unknown";
+}
 
 // Returns true if packet appears valid; pos and proto will be set
 static inline bool _ipv6GetPayload(const uint8_t* frameData, unsigned int frameLen, unsigned int& pos, unsigned int& proto)
@@ -1070,7 +1105,16 @@ void Network::multicastUnsubscribe(const MulticastGroup& mg)
 
 uint64_t Network::handleConfigChunk(void* tPtr, const uint64_t packetId, const Address& source, const Buffer<ZT_PROTO_MAX_PACKET_LENGTH>& chunk, unsigned int ptr)
 {
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+	printf("[ZT_STEP52] phase=netconf_handle_enter pktId=0x%llx src=0x%llx ptr=%u chunkSize=%u nwid=0x%llx\n",
+	       (unsigned long long)packetId, (unsigned long long)source.toInt(), (unsigned int)ptr, (unsigned int)chunk.size(), (unsigned long long)_id);
+#endif
 	if (_destroyed) {
+		printf("[ZT_NETCONF_PARSE] drop reason=destroyed pktId=0x%llx src=0x%llx\n",
+		       (unsigned long long)packetId, (unsigned long long)source.toInt());
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+		printf("[ZT_STEP52] phase=return reason=destroyed pktId=0x%llx\n", (unsigned long long)packetId);
+#endif
 		return 0;
 	}
 
@@ -1082,7 +1126,8 @@ uint64_t Network::handleConfigChunk(void* tPtr, const uint64_t packetId, const A
 	const void* chunkData = chunk.field(ptr, chunkLen);
 	ptr += chunkLen;
 
-	NetworkConfig* nc = (NetworkConfig*)0;
+		NetworkConfig* nc = (NetworkConfig*)0;
+		bool ncNeedsDelete = false;
 	uint64_t configUpdateId;
 	{
 		Mutex::Lock _l(_lock);
@@ -1098,11 +1143,41 @@ uint64_t Network::handleConfigChunk(void* tPtr, const uint64_t packetId, const A
 			ptr += 4;
 			chunkIndex = chunk.at<uint32_t>(ptr);
 			ptr += 4;
+			printf("[ZT_NETCONF_PARSE] pktId=0x%llx src=0x%llx mode=signed updateId=0x%llx chunkIndex=%lu chunkLen=%u totalLen=%lu capacity=%u fast=%u\n",
+			       (unsigned long long)packetId,
+			       (unsigned long long)source.toInt(),
+			       (unsigned long long)configUpdateId,
+			       chunkIndex,
+			       (unsigned int)chunkLen,
+			       totalLength,
+			       (unsigned int)ZT_NETWORKCONFIG_DICT_CAPACITY,
+			       (unsigned int)(fastPropagate ? 1 : 0));
 
 			if (((chunkIndex + chunkLen) > totalLength) || (totalLength >= ZT_NETWORKCONFIG_DICT_CAPACITY)) {	// >= since we need room for a null at the end
+				if (totalLength >= ZT_NETWORKCONFIG_DICT_CAPACITY) {
+					printf("[ZT_NETCONF_CAPACITY] reject totalLen=%lu capacity=%u pktId=0x%llx\n",
+					       totalLength, (unsigned int)ZT_NETWORKCONFIG_DICT_CAPACITY, (unsigned long long)packetId);
+				}
+				else {
+					printf("[ZT_NETCONF_PARSE] reject reason=chunk-bounds chunkIndex=%lu chunkLen=%u totalLen=%lu pktId=0x%llx\n",
+					       chunkIndex, (unsigned int)chunkLen, totalLength, (unsigned long long)packetId);
+				}
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+				printf("[ZT_STEP52] phase=return reason=chunk-bounds-or-capacity pktId=0x%llx chunkIndex=%lu chunkLen=%u totalLen=%lu capacity=%u\n",
+				       (unsigned long long)packetId, chunkIndex, (unsigned int)chunkLen, totalLength, (unsigned int)ZT_NETWORKCONFIG_DICT_CAPACITY);
+#endif
 				return 0;
 			}
 			if ((chunk[ptr] != 1) || (chunk.at<uint16_t>(ptr + 1) != ZT_ECC_SIGNATURE_LEN)) {
+				printf("[ZT_NETCONF_PARSE] reject reason=signature-header pktId=0x%llx sigType=%u sigLen=%u expectedLen=%u\n",
+				       (unsigned long long)packetId,
+				       (unsigned int)chunk[ptr],
+				       (unsigned int)chunk.at<uint16_t>(ptr + 1),
+				       (unsigned int)ZT_ECC_SIGNATURE_LEN);
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+				printf("[ZT_STEP52] phase=signature_check result=fail reason=signature-header pktId=0x%llx sigType=%u sigLen=%u\n",
+				       (unsigned long long)packetId, (unsigned int)chunk[ptr], (unsigned int)chunk.at<uint16_t>(ptr + 1));
+#endif
 				return 0;
 			}
 			const uint8_t* sig = reinterpret_cast<const uint8_t*>(chunk.field(ptr + 3, ZT_ECC_SIGNATURE_LEN));
@@ -1119,6 +1194,12 @@ uint64_t Network::handleConfigChunk(void* tPtr, const uint64_t packetId, const A
 
 					for (unsigned long j = 0; j < c->haveChunks; ++j) {
 						if (c->haveChunkIds[j] == chunkId) {
+							printf("[ZT_NETCONF_PARSE] reject reason=duplicate-chunk updateId=0x%llx chunkId=0x%llx pktId=0x%llx\n",
+							       (unsigned long long)configUpdateId, (unsigned long long)chunkId, (unsigned long long)packetId);
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+							printf("[ZT_STEP52] phase=return reason=duplicate-chunk updateId=0x%llx chunkId=0x%llx pktId=0x%llx\n",
+							       (unsigned long long)configUpdateId, (unsigned long long)chunkId, (unsigned long long)packetId);
+#endif
 							return 0;
 						}
 					}
@@ -1133,11 +1214,27 @@ uint64_t Network::handleConfigChunk(void* tPtr, const uint64_t packetId, const A
 			// If it's not a duplicate, check chunk signature
 			const Identity controllerId(RR->topology->getIdentity(tPtr, controller()));
 			if (! controllerId) {	// we should always have the controller identity by now, otherwise how would we have queried it the first time?
+				printf("[ZT_NETCONF_PARSE] reject reason=missing-controller-identity ctrl=0x%llx pktId=0x%llx\n",
+				       (unsigned long long)controller().toInt(), (unsigned long long)packetId);
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+				printf("[ZT_STEP52] phase=signature_check result=fail reason=missing-controller-identity ctrl=0x%llx pktId=0x%llx\n",
+				       (unsigned long long)controller().toInt(), (unsigned long long)packetId);
+#endif
 				return 0;
 			}
 			if (! controllerId.verify(chunk.field(start, ptr - start), ptr - start, sig, ZT_ECC_SIGNATURE_LEN)) {
+				printf("[ZT_NETCONF_PARSE] reject reason=signature-verify ctrl=0x%llx pktId=0x%llx span=%u\n",
+				       (unsigned long long)controller().toInt(), (unsigned long long)packetId, (unsigned int)(ptr - start));
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+				printf("[ZT_STEP52] phase=signature_check result=fail reason=verify-fail ctrl=0x%llx pktId=0x%llx span=%u\n",
+				       (unsigned long long)controller().toInt(), (unsigned long long)packetId, (unsigned int)(ptr - start));
+#endif
 				return 0;
 			}
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+			printf("[ZT_STEP52] phase=signature_check result=ok pktId=0x%llx updateId=0x%llx\n",
+			       (unsigned long long)packetId, (unsigned long long)configUpdateId);
+#endif
 
 			// New properly verified chunks can be flooded "virally" through the network
 			if (fastPropagate) {
@@ -1159,8 +1256,16 @@ uint64_t Network::handleConfigChunk(void* tPtr, const uint64_t packetId, const A
 			configUpdateId = chunkId;
 			totalLength = chunkLen;
 			chunkIndex = 0;
+			printf("[ZT_NETCONF_PARSE] pktId=0x%llx src=0x%llx mode=legacy totalLen=%lu chunkLen=%u capacity=%u\n",
+			       (unsigned long long)packetId,
+			       (unsigned long long)source.toInt(),
+			       totalLength,
+			       (unsigned int)chunkLen,
+			       (unsigned int)ZT_NETWORKCONFIG_DICT_CAPACITY);
 
 			if (totalLength >= ZT_NETWORKCONFIG_DICT_CAPACITY) {
+				printf("[ZT_NETCONF_CAPACITY] reject legacy totalLen=%lu capacity=%u pktId=0x%llx\n",
+				       totalLength, (unsigned int)ZT_NETWORKCONFIG_DICT_CAPACITY, (unsigned long long)packetId);
 				return 0;
 			}
 
@@ -1172,6 +1277,12 @@ uint64_t Network::handleConfigChunk(void* tPtr, const uint64_t packetId, const A
 		}
 		else {
 			// Single-chunk unsigned legacy configs are only allowed from the controller itself
+			printf("[ZT_NETCONF_PARSE] reject reason=legacy-noncontroller src=0x%llx ctrl=0x%llx pktId=0x%llx\n",
+			       (unsigned long long)source.toInt(), (unsigned long long)controller().toInt(), (unsigned long long)packetId);
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+			printf("[ZT_STEP52] phase=return reason=legacy-noncontroller src=0x%llx ctrl=0x%llx pktId=0x%llx\n",
+			       (unsigned long long)source.toInt(), (unsigned long long)controller().toInt(), (unsigned long long)packetId);
+#endif
 			return 0;
 		}
 
@@ -1183,36 +1294,273 @@ uint64_t Network::handleConfigChunk(void* tPtr, const uint64_t packetId, const A
 			c->haveBytes = 0;
 		}
 		if (c->haveChunks >= ZT_NETWORK_MAX_UPDATE_CHUNKS) {
+			printf("[ZT_NETCONF_PARSE] reject reason=too-many-chunks updateId=0x%llx haveChunks=%lu max=%u\n",
+			       (unsigned long long)configUpdateId, c->haveChunks, (unsigned int)ZT_NETWORK_MAX_UPDATE_CHUNKS);
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+			printf("[ZT_STEP52] phase=return reason=too-many-chunks updateId=0x%llx haveChunks=%lu max=%u\n",
+			       (unsigned long long)configUpdateId, c->haveChunks, (unsigned int)ZT_NETWORK_MAX_UPDATE_CHUNKS);
+#endif
 			return false;
 		}
 		c->haveChunkIds[c->haveChunks++] = chunkId;
 
 		memcpy(c->data.unsafeData() + chunkIndex, chunkData, chunkLen);
 		c->haveBytes += chunkLen;
+		printf("[ZT_NETCONF_PARSE] assembled updateId=0x%llx haveBytes=%lu totalLen=%lu haveChunks=%lu\n",
+		       (unsigned long long)configUpdateId, c->haveBytes, totalLength, c->haveChunks);
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+			printf("[ZT_STEP52] phase=netconf_assembled updateId=0x%llx haveBytes=%lu totalLen=%lu haveChunks=%lu\n",
+			       (unsigned long long)configUpdateId, c->haveBytes, totalLength, c->haveChunks);
+#endif
+#ifdef ZT_ESP32_STEP53_POST_ASSEMBLY_BRANCH_TRACE
+			printf("[ZT_STEP53] point=after_assembled_marker pktId=0x%llx src=0x%llx ctrl=0x%llx nwid=0x%llx updateId=0x%llx ptr=%u start=%u totalLen=%lu haveBytes=%lu haveChunks=%lu chunkIndex=%lu chunkLen=%u c=%p sourceIsController=%u signedMode=%u\n",
+			       (unsigned long long)packetId,
+			       (unsigned long long)source.toInt(),
+			       (unsigned long long)controller().toInt(),
+			       (unsigned long long)_id,
+			       (unsigned long long)configUpdateId,
+			       (unsigned int)ptr,
+			       (unsigned int)start,
+			       totalLength,
+			       c->haveBytes,
+			       c->haveChunks,
+			       chunkIndex,
+			       (unsigned int)chunkLen,
+			       (void*)c,
+			       (unsigned int)((source == controller()) ? 1 : 0),
+			       (unsigned int)((ptr < chunk.size()) ? 1 : 0));
+			printf("[ZT_STEP53] point=post_assembly_condition name=haveBytes_eq_totalLength value=%u updateId=0x%llx haveBytes=%lu totalLen=%lu\n",
+			       (unsigned int)((c->haveBytes == totalLength) ? 1 : 0),
+			       (unsigned long long)configUpdateId,
+			       c->haveBytes,
+			       totalLength);
+#endif
 
-		if (c->haveBytes == totalLength) {
-			c->data.unsafeData()[c->haveBytes] = (char)0;	// ensure null terminated
+			if (c->haveBytes == totalLength) {
+#ifdef ZT_ESP32_STEP53_POST_ASSEMBLY_BRANCH_TRACE
+				printf("[ZT_STEP53] point=branch_enter name=haveBytes_eq_totalLength_true updateId=0x%llx\n",
+				       (unsigned long long)configUpdateId);
+				printf("[ZT_STEP53] point=before_construct_block pktId=0x%llx updateId=0x%llx c=%p haveBytes=%lu totalLen=%lu\n",
+				       (unsigned long long)packetId,
+				       (unsigned long long)configUpdateId,
+				       (void*)c,
+				       c->haveBytes,
+				       totalLength);
+				printf("[ZT_STEP53] point=construct_block_enter pktId=0x%llx updateId=0x%llx\n",
+				       (unsigned long long)packetId,
+				       (unsigned long long)configUpdateId);
+				printf("[ZT_STEP53] point=try_enter updateId=0x%llx\n",
+				       (unsigned long long)configUpdateId);
+				printf("[ZT_STEP53] point=before_new_networkconfig updateId=0x%llx\n",
+				       (unsigned long long)configUpdateId);
+#endif
+				c->data.unsafeData()[c->haveBytes] = (char)0;	// ensure null terminated
 
-			nc = new NetworkConfig();
-			try {
-				if (! nc->fromDictionary(c->data)) {
-					delete nc;
-					nc = (NetworkConfig*)0;
+#ifdef ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE
+				size_t heapFreeBefore = 0;
+				size_t heapMinBefore = 0;
+				size_t heapLargestBefore = 0;
+				unsigned int stackHwBefore = 0;
+#ifdef ESP_PLATFORM
+				heapFreeBefore = (size_t)esp_get_free_heap_size();
+				heapMinBefore = (size_t)esp_get_minimum_free_heap_size();
+				heapLargestBefore = (size_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+				stackHwBefore = (unsigned int)uxTaskGetStackHighWaterMark(xTaskGetCurrentTaskHandle());
+#endif
+				printf("[ZT_STEP54] point=before_alloc updateId=0x%llx pktId=0x%llx nwid=0x%llx sizeofNetworkConfig=%u heapFree=%u heapMin=%u largestBlock=%u stackHighWater=%u\n",
+				       (unsigned long long)configUpdateId,
+				       (unsigned long long)packetId,
+				       (unsigned long long)_id,
+				       (unsigned int)sizeof(NetworkConfig),
+				       (unsigned int)heapFreeBefore,
+				       (unsigned int)heapMinBefore,
+				       (unsigned int)heapLargestBefore,
+				       (unsigned int)stackHwBefore);
+				printf("[ZT_STEP54] point=operator_new_mode mode=nothrow updateId=0x%llx\n",
+				       (unsigned long long)configUpdateId);
+#endif
+				nc = new (std::nothrow) NetworkConfig();
+				ncNeedsDelete = (nc != (NetworkConfig*)0);
+#ifdef ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE
+				if (!nc) {
+					printf("[ZT_STEP54] point=alloc_null updateId=0x%llx pktId=0x%llx\n",
+					       (unsigned long long)configUpdateId,
+					       (unsigned long long)packetId);
+#ifdef ESP_PLATFORM
+					printf("[ZT_ALLOC_GUARD] FAIL sizeof=%u heapFree=%u largest=%u min=%u stack=%u fallback=0\n",
+					       (unsigned int)sizeof(NetworkConfig),
+					       (unsigned int)esp_get_free_heap_size(),
+					       (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+					       (unsigned int)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
+					       (unsigned int)uxTaskGetStackHighWaterMark(xTaskGetCurrentTaskHandle()));
+#endif
+#if ZT_ESP32_STEP55_NETCONF_ALLOC_FIX
+					static NetworkConfig step55FallbackNc;
+					nc = &step55FallbackNc;
+					ncNeedsDelete = false;
+					printf("[ZT_STEP55] point=fallback_static_nc updateId=0x%llx ptr=%p reason=alloc-null\n",
+					       (unsigned long long)configUpdateId, (void*)nc);
+#else
+					printf("[ZT_ALLOC_GUARD] fallback=disabled returning without nc\n");
+#endif
+				}
+				else {
+					size_t heapFreeAfter = 0;
+					size_t heapMinAfter = 0;
+					size_t heapLargestAfter = 0;
+					unsigned int stackHwAfter = 0;
+#ifdef ESP_PLATFORM
+					heapFreeAfter = (size_t)esp_get_free_heap_size();
+					heapMinAfter = (size_t)esp_get_minimum_free_heap_size();
+					heapLargestAfter = (size_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+					stackHwAfter = (unsigned int)uxTaskGetStackHighWaterMark(xTaskGetCurrentTaskHandle());
+#endif
+					printf("[ZT_STEP54] point=after_alloc ptr=%p updateId=0x%llx heapFree=%u heapMin=%u largestBlock=%u stackHighWater=%u\n",
+					       (void*)nc,
+					       (unsigned long long)configUpdateId,
+					       (unsigned int)heapFreeAfter,
+					       (unsigned int)heapMinAfter,
+					       (unsigned int)heapLargestAfter,
+					       (unsigned int)stackHwAfter);
+					printf("[ZT_ALLOC_GUARD] OK sizeof=%u ptr=%p heapFree=%u largest=%u min=%u stack=%u fallback=0\n",
+					       (unsigned int)sizeof(NetworkConfig),
+					       (void*)nc,
+					       (unsigned int)heapFreeAfter,
+					       (unsigned int)heapLargestAfter,
+					       (unsigned int)heapMinAfter,
+					       (unsigned int)stackHwAfter);
+				}
+#endif
+#ifdef ZT_ESP32_STEP53_POST_ASSEMBLY_BRANCH_TRACE
+				printf("[ZT_STEP53] point=after_new_networkconfig ptr=%p updateId=0x%llx\n",
+				       (void*)nc, (unsigned long long)configUpdateId);
+#endif
+				if (!nc) {
+#ifdef ESP_PLATFORM
+					printf("[ZT_NETCONF_GUARD] skip_refresh reason=networkconfig_alloc_failed updateId=0x%llx sizeof=%u heapFree=%u largest=%u min=%u\n",
+					       (unsigned long long)configUpdateId,
+					       (unsigned int)sizeof(NetworkConfig),
+					       (unsigned int)esp_get_free_heap_size(),
+					       (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+					       (unsigned int)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+#else
+					printf("[ZT_NETCONF_GUARD] skip_refresh reason=networkconfig_alloc_failed updateId=0x%llx sizeof=%u\n",
+					       (unsigned long long)configUpdateId, (unsigned int)sizeof(NetworkConfig));
+#endif
+					return 0;
+				}
+				try {
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+					printf("[ZT_STEP52] phase=netconf_construct_begin updateId=0x%llx bytes=%lu\n",
+					       (unsigned long long)configUpdateId, c->haveBytes);
+#endif
+#ifdef ZT_ESP32_STEP53_POST_ASSEMBLY_BRANCH_TRACE
+					printf("[ZT_STEP53] point=before_fromDictionary updateId=0x%llx bytes=%lu\n",
+					       (unsigned long long)configUpdateId, c->haveBytes);
+#endif
+					printf("[ZT_NETCONF_PARSE] fromDictionary begin updateId=0x%llx bytes=%lu\n",
+					       (unsigned long long)configUpdateId, c->haveBytes);
+					const bool fromDictionaryOk = nc->fromDictionary(c->data);
+#ifdef ZT_ESP32_STEP53_POST_ASSEMBLY_BRANCH_TRACE
+					printf("[ZT_STEP53] point=after_fromDictionary result=%u updateId=0x%llx\n",
+					       (unsigned int)(fromDictionaryOk ? 1 : 0),
+					       (unsigned long long)configUpdateId);
+#endif
+					if (! fromDictionaryOk) {
+					printf("[ZT_NETCONF_PARSE] fromDictionary fail updateId=0x%llx\n",
+					       (unsigned long long)configUpdateId);
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+					printf("[ZT_STEP52] phase=dict_decode_fail reason=fromDictionary-false updateId=0x%llx\n",
+					       (unsigned long long)configUpdateId);
+#endif
+						if (ncNeedsDelete) {
+							delete nc;
+						}
+						nc = (NetworkConfig*)0;
+						ncNeedsDelete = false;
+					}
+				else {
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+					printf("[ZT_STEP52] phase=netconf_construct_ok updateId=0x%llx nwid=0x%llx issuedTo=0x%llx rev=%llu ts=%llu staticIpCount=%u routeCount=%u ruleCount=%u\n",
+					       (unsigned long long)configUpdateId,
+					       (unsigned long long)nc->networkId,
+					       (unsigned long long)nc->issuedTo.toInt(),
+					       (unsigned long long)nc->revision,
+					       (unsigned long long)nc->timestamp,
+					       (unsigned int)nc->staticIpCount,
+					       (unsigned int)nc->routeCount,
+					       (unsigned int)nc->ruleCount);
+#endif
+					printf("[ZT_NETCONF_PARSE] fromDictionary ok nwid=0x%llx issuedTo=0x%llx rev=%llu ts=%llu staticIpCount=%u routeCount=%u ruleCount=%u\n",
+					       (unsigned long long)nc->networkId,
+					       (unsigned long long)nc->issuedTo.toInt(),
+					       (unsigned long long)nc->revision,
+					       (unsigned long long)nc->timestamp,
+					       (unsigned int)nc->staticIpCount,
+					       (unsigned int)nc->routeCount,
+					       (unsigned int)nc->ruleCount);
 				}
 			}
 			catch (...) {
-				delete nc;
-				nc = (NetworkConfig*)0;
+				printf("[ZT_NETCONF_PARSE] fromDictionary exception updateId=0x%llx\n",
+				       (unsigned long long)configUpdateId);
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+				printf("[ZT_STEP52] phase=dict_decode_fail reason=fromDictionary-exception updateId=0x%llx\n",
+				       (unsigned long long)configUpdateId);
+#endif
+					if (ncNeedsDelete) {
+						delete nc;
+					}
+					nc = (NetworkConfig*)0;
+					ncNeedsDelete = false;
+				}
+				}
+#ifdef ZT_ESP32_STEP53_POST_ASSEMBLY_BRANCH_TRACE
+			else {
+				printf("[ZT_STEP53] point=branch_skip name=haveBytes_eq_totalLength_true reason=condition-false updateId=0x%llx haveBytes=%lu totalLen=%lu\n",
+				       (unsigned long long)configUpdateId, c->haveBytes, totalLength);
 			}
+#endif
 		}
-	}
 
 	if (nc) {
-		this->setConfiguration(tPtr, *nc, true);
-		delete nc;
-		return configUpdateId;
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+		printf("[ZT_STEP52] phase=set_configuration_begin nwid=0x%llx updateId=0x%llx\n",
+		       (unsigned long long)_id, (unsigned long long)configUpdateId);
+#endif
+		puts("[ZT_CFG_FLOW] handleConfigChunk before_setConfiguration");
+		const int setResult = this->setConfiguration(tPtr, *nc, true);
+		if (setResult > 0) {
+			puts("[ZT_CFG_FLOW] handleConfigChunk after_setConfiguration_ok");
+		} else {
+			puts("[ZT_CFG_FLOW] handleConfigChunk after_setConfiguration_fail");
+		}
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+		printf("[ZT_STEP52] phase=set_configuration_end result=%d nwid=0x%llx updateId=0x%llx\n",
+		       setResult, (unsigned long long)_id, (unsigned long long)configUpdateId);
+#endif
+			if (ncNeedsDelete) {
+				delete nc;
+			}
+			return configUpdateId;
 	}
 	else {
+#ifdef ZT_ESP32_STEP53_POST_ASSEMBLY_BRANCH_TRACE
+		printf("[ZT_STEP53] point=fallthrough reason=nc-null-after-lock pktId=0x%llx src=0x%llx updateId=0x%llx return=0\n",
+		       (unsigned long long)packetId,
+		       (unsigned long long)source.toInt(),
+		       (unsigned long long)configUpdateId);
+#endif
+		printf("[ZT_NETCONF_PARSE] incomplete-or-rejected pktId=0x%llx src=0x%llx\n",
+		       (unsigned long long)packetId, (unsigned long long)source.toInt());
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+		printf("[ZT_STEP52] phase=return reason=incomplete-or-rejected pktId=0x%llx src=0x%llx\n",
+		       (unsigned long long)packetId, (unsigned long long)source.toInt());
+#endif
+#ifdef ZT_ESP32_STEP53_POST_ASSEMBLY_BRANCH_TRACE
+		printf("[ZT_STEP53] point=return reason=incomplete-or-rejected pktId=0x%llx src=0x%llx return=0\n",
+		       (unsigned long long)packetId, (unsigned long long)source.toInt());
+#endif
 		return 0;
 	}
 
@@ -1221,16 +1569,43 @@ uint64_t Network::handleConfigChunk(void* tPtr, const uint64_t packetId, const A
 
 int Network::setConfiguration(void* tPtr, const NetworkConfig& nconf, bool saveToDisk)
 {
+	puts("[ZT_CFG_FLOW] setConfiguration enter");
 	if (_destroyed) {
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+		printf("[ZT_STEP52] phase=apply_end result=0 reason=destroyed nwid=0x%llx\n", (unsigned long long)_id);
+#endif
 		return 0;
 	}
 
 	// _lock is NOT locked when this is called
 	try {
 		if ((nconf.issuedTo != RR->identity.address()) || (nconf.networkId != _id)) {
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+			printf("[ZT_STEP52] phase=validation_fail reason=identity-or-network-mismatch nwid=0x%llx inNwid=0x%llx issuedTo=0x%llx local=0x%llx\n",
+			       (unsigned long long)_id,
+			       (unsigned long long)nconf.networkId,
+			       (unsigned long long)nconf.issuedTo.toInt(),
+			       (unsigned long long)RR->identity.address().toInt());
+#endif
 			return 0;	// invalid config that is not for us or not for this network
 		}
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+		printf("[ZT_STEP52] phase=validation_ok nwid=0x%llx inNwid=0x%llx issuedTo=0x%llx\n",
+		       (unsigned long long)_id,
+		       (unsigned long long)nconf.networkId,
+		       (unsigned long long)nconf.issuedTo.toInt());
+		printf("[ZT_STEP52] phase=revision_check localRev=%llu incomingRev=%llu localTs=%llu incomingTs=%llu\n",
+		       (unsigned long long)_config.revision,
+		       (unsigned long long)nconf.revision,
+		       (unsigned long long)_config.timestamp,
+		       (unsigned long long)nconf.timestamp);
+#endif
 		if (_config == nconf) {
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+			printf("[ZT_STEP52] phase=revision_reject reason=duplicate-unchanged nwid=0x%llx rev=%llu\n",
+			       (unsigned long long)_id, (unsigned long long)nconf.revision);
+#endif
+			puts("[ZT_CFG_FLOW] setConfiguration return_unchanged");
 			return 1;	// OK config, but duplicate of what we already have
 		}
 
@@ -1246,11 +1621,29 @@ int Network::setConfiguration(void* tPtr, const NetworkConfig& nconf, bool saveT
 			oldPortInitialized = _portInitialized;
 			_portInitialized = true;
 
+			puts("[ZT_CFG_FLOW] setConfiguration before_externalConfig");
 			_externalConfig(&ctmp);
+			puts("[ZT_CFG_FLOW] setConfiguration after_externalConfig");
 		}
 
+		puts("[ZT_CFG_FLOW] setConfiguration before_callback");
 		_portError = RR->node->configureVirtualNetworkPort(tPtr, _id, &_uPtr, (oldPortInitialized) ? ZT_VIRTUAL_NETWORK_CONFIG_OPERATION_CONFIG_UPDATE : ZT_VIRTUAL_NETWORK_CONFIG_OPERATION_UP, &ctmp);
+		puts("[ZT_CFG_FLOW] setConfiguration after_callback");
 		_authenticationURL = nconf.authenticationURL;
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+		printf("[ZT_STEP52] phase=configureVirtualNetworkPort reached=1 op=%s status=%d portError=%d assigned=%u routes=%u rev=%lu\n",
+		       oldPortInitialized ? "CONFIG_UPDATE" : "UP",
+		       (int)ctmp.status,
+		       (int)_portError,
+		       (unsigned int)ctmp.assignedAddressCount,
+		       (unsigned int)ctmp.routeCount,
+		       ctmp.netconfRevision);
+		printf("[ZT_STEP52] phase=vnet_status status=%d portError=%d assigned=%u routes=%u\n",
+		       (int)ctmp.status,
+		       (int)_portError,
+		       (unsigned int)ctmp.assignedAddressCount,
+		       (unsigned int)ctmp.routeCount);
+#endif
 
 		if (saveToDisk) {
 			Dictionary<ZT_NETWORKCONFIG_DICT_CAPACITY>* const d = new Dictionary<ZT_NETWORKCONFIG_DICT_CAPACITY>();
@@ -1267,9 +1660,20 @@ int Network::setConfiguration(void* tPtr, const NetworkConfig& nconf, bool saveT
 			delete d;
 		}
 
-		return 2;	// OK and configuration has changed
+		{
+			const int ret = 2;	// OK and configuration has changed
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+			printf("[ZT_STEP52] phase=apply_end result=%d nwid=0x%llx\n", ret, (unsigned long long)_id);
+#endif
+			puts("[ZT_CFG_FLOW] setConfiguration return_changed");
+			return ret;
+		}
 	}
 	catch (...) {
+#if ZT_ESP32_STEP52_NETCONF_APPLY_TRACE
+		printf("[ZT_STEP52] phase=apply_end result=0 reason=exception nwid=0x%llx\n", (unsigned long long)_id);
+#endif
+		puts("[ZT_CFG_FLOW] setConfiguration exception");
 	}	// ignore invalid configs
 	return 0;
 }
@@ -1459,6 +1863,14 @@ void Network::requestConfiguration(void* tPtr)
 	}
 	outp.compress();
 	RR->node->expectReplyTo(outp.packetId());
+	printf("[ZT_NETCONF_REQ] nwid=0x%llx ctrl=0x%llx pktId=0x%llx cfgRev=%llu cfgTs=%llu lastCfgUpdate=%llu metaBytes=%u\n",
+	       (unsigned long long)_id,
+	       (unsigned long long)ctrl.toInt(),
+	       (unsigned long long)outp.packetId(),
+	       (unsigned long long)((_config) ? _config.revision : 0ULL),
+	       (unsigned long long)((_config) ? _config.timestamp : 0ULL),
+	       (unsigned long long)_lastConfigUpdate,
+	       (unsigned int)rmdSize);
 	printf("[ZT] requestConfiguration nwid=0x%llx ctrl=0x%llx\n",
 	       (unsigned long long)_id, (unsigned long long)ctrl.toInt());
 	RR->sw->send(tPtr, outp, true, _id, ZT_QOS_NO_FLOW);
@@ -1695,8 +2107,14 @@ void Network::_externalConfig(ZT_VirtualNetworkConfig* ec) const
 		}
 	}
 
-	ec->multicastSubscriptionCount = (unsigned int)_myMulticastGroups.size();
-	for (unsigned long i = 0; i < (unsigned long)_myMulticastGroups.size(); ++i) {
+	const unsigned long mcCount = (unsigned long)_myMulticastGroups.size();
+	const unsigned long mcCap = (unsigned long)ZT_MAX_MULTICAST_SUBSCRIPTIONS;
+	const unsigned long mcCopyCount = (mcCount < mcCap) ? mcCount : mcCap;
+	if (mcCount > mcCap) {
+		printf("[ZT_CFG_FLOW] multicast_subscriptions_truncated count=%lu cap=%lu\n", mcCount, mcCap);
+	}
+	ec->multicastSubscriptionCount = (unsigned int)mcCopyCount;
+	for (unsigned long i = 0; i < mcCopyCount; ++i) {
 		ec->multicastSubscriptions[i].mac = _myMulticastGroups[i].mac().toInt();
 		ec->multicastSubscriptions[i].adi = _myMulticastGroups[i].adi();
 	}
@@ -1783,6 +2201,15 @@ void Network::_announceMulticastGroupsTo(void* tPtr, const Address& peer, const 
 	// Assumes _lock is locked
 	Packet* const outp = new Packet(peer, RR->identity.address(), Packet::VERB_MULTICAST_LIKE);
 
+	printf("[ZT_MULTICAST_LIKE_TX] node_name=%s node_id=0x%llx zt_managed_ip=%s nwid=0x%llx event=MULTICAST_LIKE_TX dest_peer=0x%llx dest_name=%s group_count=%u action=publish result=sent\n",
+	       _zt_net_node_name(RR->identity.address().toInt()),
+	       (unsigned long long)RR->identity.address().toInt(),
+	       _zt_net_managed_ip(RR->identity.address().toInt()),
+	       (unsigned long long)_id,
+	       (unsigned long long)peer.toInt(),
+	       _zt_net_node_name(peer.toInt()),
+	       (unsigned int)allMulticastGroups.size());
+
 	for (std::vector<MulticastGroup>::const_iterator mg(allMulticastGroups.begin()); mg != allMulticastGroups.end(); ++mg) {
 		if ((outp->size() + 24) >= ZT_PROTO_MAX_PACKET_LENGTH) {
 			outp->compress();
@@ -1794,6 +2221,20 @@ void Network::_announceMulticastGroupsTo(void* tPtr, const Address& peer, const 
 		outp->append((uint64_t)_id);
 		mg->mac().appendTo(*outp);
 		outp->append((uint32_t)mg->adi());
+
+		const uint64_t macint = mg->mac().toInt();
+		char macbuf[24];
+		snprintf(macbuf, sizeof(macbuf), "%02x:%02x:%02x:%02x:%02x:%02x",
+		         (unsigned)((macint>>40)&0xff), (unsigned)((macint>>32)&0xff),
+		         (unsigned)((macint>>24)&0xff), (unsigned)((macint>>16)&0xff),
+		         (unsigned)((macint>>8)&0xff),  (unsigned)(macint&0xff));
+		printf("[ZT_MULTICAST_LIKE_TX] node_name=%s node_id=0x%llx zt_managed_ip=%s nwid=0x%llx event=MULTICAST_LIKE_TX_GROUP mac=%s adi=%u adi_hex=0x%08x group_key=%s/%u source=local\n",
+		       _zt_net_node_name(RR->identity.address().toInt()),
+		       (unsigned long long)RR->identity.address().toInt(),
+		       _zt_net_managed_ip(RR->identity.address().toInt()),
+		       (unsigned long long)_id,
+		       macbuf, (unsigned)mg->adi(), (unsigned)mg->adi(),
+		       macbuf, (unsigned)mg->adi());
 	}
 
 	if (outp->size() > ZT_PROTO_MIN_PACKET_LENGTH) {

@@ -11,6 +11,7 @@ Derived from public domain code by D. J. Bernstein.
 
 #include "SHA512.hpp"
 
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -2350,7 +2351,11 @@ static inline void ge25519_pack(unsigned char r[32], const ge25519_p3* p)
 static inline void ge25519_double_scalarmult_vartime(ge25519_p3* r, const ge25519_p3* p1, const sc25519* s1, const ge25519_p3* p2, const sc25519* s2)
 {
 	ge25519_p1p1 tp1p1;
+#ifdef ESP_PLATFORM
 	ge25519_p3 *pre = (ge25519_p3 *)heap_caps_malloc(sizeof(ge25519_p3) * 16, MALLOC_CAP_8BIT);
+#else
+	ge25519_p3 *pre = (ge25519_p3 *)malloc(sizeof(ge25519_p3) * 16);
+#endif
 	if (!pre) {
 		return;
 	}
@@ -2408,7 +2413,11 @@ static inline void ge25519_double_scalarmult_vartime(ge25519_p3* r, const ge2551
 			p1p1_to_p3(r, &tp1p1);
 		}
 	}
+#ifdef ESP_PLATFORM
 	heap_caps_free(pre);
+#else
+	free(pre);
+#endif
 }
 
 static inline void ge25519_scalarmult_base(ge25519_p3* r, const sc25519* s)

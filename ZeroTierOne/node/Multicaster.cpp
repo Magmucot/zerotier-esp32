@@ -22,6 +22,21 @@
 
 namespace ZeroTier {
 
+static const char* _zt_mc_node_name(uint64_t addr) {
+	if (addr == 0xd526b558a5ULL) return "ESP32-QEMU";
+	if (addr == 0x4c7d125767ULL) return "ZT-ALPINE-LINUX";
+	if (addr == 0x02f5c63563ULL) return "ZT-DEV-LINUX";
+	if (addr == 0x24a5a693a7ULL) return "MACBOOK";
+	if (addr == 0xf0d8f9eec2ULL) return "SDWAN";
+	return "unknown";
+}
+static const char* _zt_mc_managed_ip(uint64_t addr) {
+	if (addr == 0xd526b558a5ULL) return "172.25.204.197";
+	if (addr == 0x4c7d125767ULL) return "172.25.206.161";
+	if (addr == 0x02f5c63563ULL) return "172.25.22.191";
+	return "unknown";
+}
+
 Multicaster::Multicaster(const RuntimeEnvironment* renv) : RR(renv), _groups(32)
 {
 }
@@ -293,6 +308,22 @@ void Multicaster::send(void* tPtr, int64_t now, const SharedPtr<Network>& networ
 					}
 				}
 
+				{
+					const uint64_t macint2 = mg.mac().toInt();
+					char mbuf2[24];
+					snprintf(mbuf2, sizeof(mbuf2), "%02x:%02x:%02x:%02x:%02x:%02x",
+					         (unsigned)((macint2>>40)&0xff),(unsigned)((macint2>>32)&0xff),
+					         (unsigned)((macint2>>24)&0xff),(unsigned)((macint2>>16)&0xff),
+					         (unsigned)((macint2>>8)&0xff), (unsigned)(macint2&0xff));
+					printf("[ZT_MULTICAST_LOCAL_STATE] node_name=%s node_id=0x%llx zt_managed_ip=%s nwid=0x%llx event=MULTICAST_LOCAL_STATE mac=%s adi=%u adi_hex=0x%08x group_key=%s/%u local_registered=yes known_member_count=%u source=local_mc_db\n",
+					       _zt_mc_node_name(RR->identity.address().toInt()),
+					       (unsigned long long)RR->identity.address().toInt(),
+					       _zt_mc_managed_ip(RR->identity.address().toInt()),
+					       (unsigned long long)network->id(),
+					       mbuf2, (unsigned)mg.adi(), (unsigned)mg.adi(),
+					       mbuf2, (unsigned)mg.adi(),
+					       (unsigned int)gs.members.size());
+				}
 				for (unsigned int k = 0; k < numExplicitGatherPeers; ++k) {
 					const CertificateOfMembership* com = (network) ? ((network->config().com) ? &(network->config().com) : (const CertificateOfMembership*)0) : (const CertificateOfMembership*)0;
 					Packet outp(explicitGatherPeers[k], RR->identity.address(), Packet::VERB_MULTICAST_GATHER);
@@ -305,6 +336,23 @@ void Multicaster::send(void* tPtr, int64_t now, const SharedPtr<Network>& networ
 						com->serialize(outp);
 					}
 					RR->node->expectReplyTo(outp.packetId());
+					{
+						const uint64_t macint3 = mg.mac().toInt();
+						char mbuf3[24];
+						snprintf(mbuf3, sizeof(mbuf3), "%02x:%02x:%02x:%02x:%02x:%02x",
+						         (unsigned)((macint3>>40)&0xff),(unsigned)((macint3>>32)&0xff),
+						         (unsigned)((macint3>>24)&0xff),(unsigned)((macint3>>16)&0xff),
+						         (unsigned)((macint3>>8)&0xff), (unsigned)(macint3&0xff));
+						printf("[ZT_MULTICAST_GATHER_TX] node_name=%s node_id=0x%llx zt_managed_ip=%s nwid=0x%llx event=MULTICAST_GATHER_TX mac=%s adi=%u adi_hex=0x%08x group_key=%s/%u dest=0x%llx gatherLimit=%u trigger=multicast result=sent reason=members_needed\n",
+						       _zt_mc_node_name(RR->identity.address().toInt()),
+						       (unsigned long long)RR->identity.address().toInt(),
+						       _zt_mc_managed_ip(RR->identity.address().toInt()),
+						       (unsigned long long)network->id(),
+						       mbuf3, (unsigned)mg.adi(), (unsigned)mg.adi(),
+						       mbuf3, (unsigned)mg.adi(),
+						       (unsigned long long)explicitGatherPeers[k].toInt(),
+						       gatherLimit);
+					}
 					RR->sw->send(tPtr, outp, true, network->id(), ZT_QOS_NO_FLOW);
 					Metrics::pkt_multicast_gather_out++;
 				}

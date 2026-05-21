@@ -1,0 +1,39 @@
+menu "ZeroTier ESP32 Lite"
+
+config ZT_ESP32_LITE
+    bool "Enable ZeroTier ESP32 Lite port"
+    default y
+
+config ZT_ESP32_FRAME_POOL_BUFFERS
+    int "ZeroTier ESP32 frame pool buffers"
+    default 6
+    range 4 16
+
+config ZT_ESP32_MAX_WIRE_PACKET_SIZE
+    int "ZeroTier ESP32 max wire packet size"
+    default 2048
+    range 1500 4096
+
+config ZT_ESP32_OWNER_STACK_WORDS
+    int "ZeroTier owner task stack words"
+    default 32768
+
+config ZT_ESP32_WIRE_RX_STACK_WORDS
+    int "ZeroTier wire RX task stack words"
+    default 8192
+
+config ZT_ESP32_MAX_MANAGED_ROUTES
+    int "ZeroTier ESP32 max managed routes"
+    default 8
+    range 1 16
+
+config ZT_ESP32_MAX_MANAGED_IPS
+    int "ZeroTier ESP32 max managed IPs"
+    default 4
+    range 1 8
+
+config ZT_ESP32_LOG_TRANSITIONS
+    bool "Log ZeroTier ESP32 state transitions"
+    default y
+
+endmenu
