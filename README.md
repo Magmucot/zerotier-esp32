@@ -106,7 +106,8 @@ Important project areas:
 ```text
 /project
 ├── components/zerotier_node/              ESP-IDF component integration
-├── ZeroTierOne/                           Patched ZeroTierOne source tree
+├── ZeroTierOne/                           ZeroTierOne source tree (v1.16)
+├── ZeroTierOne/osdep/ESP32*.*             ESP32 implementation files
 ├── sdkconfig                              ESP-IDF project configuration
 ├── README.md                              Project overview
 └── ESP32_ZEROTIER_LITE_ARCHITECTURE.md    Detailed ESP32-ZeroTier-Lite architecture
