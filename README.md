@@ -1,7 +1,7 @@
-# ZeroTier client for ESP32 / ESPHome
+# ZeroTier client for ESP32 / ESPHome (Home Assistant)
 
-Experimental open-source effort to build a native ZeroTier client for ESP32-class devices, using ESP-IDF, lwIP, QEMU-based testing, and a future integration path for ESPHome and Home Assistant.
-
+An experimental, open-source project aiming to build a native [ZeroTier](https://zerotier.com "ZeroTier about page") SD-WAN client called [ZeroTierOne](https://github.com/zerotier/zerotierone "Github public source code for ZeroTierOne") for ESP32-class devices. It utilizes ESP-IDF, lwIP, and QEMU-based testing, providing a future integration path for ESPHome and Home Assistant.
+ 
 ## Goal
 
 The goal is to make an ESP32 device a native ZeroTier network member without requiring an external gateway, router, Raspberry Pi, or Home Assistant add-on to bridge traffic.
