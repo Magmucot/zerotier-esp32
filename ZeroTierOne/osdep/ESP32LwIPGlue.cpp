@@ -6,6 +6,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include <atomic>
+#include <mutex>
 
 namespace ZeroTier {
 
@@ -23,7 +25,11 @@ struct ZtLwipCall {
 	bool signalSem;
 };
 
-static volatile TaskHandle_t _ztTcpipThreadTask = (TaskHandle_t)0;
+static std::atomic<TaskHandle_t> _ztTcpipThreadTask{nullptr};
+static sys_sem_t _captureSem;
+static std::atomic<bool> _captureSemInitialized{false};
+static std::atomic<bool> _capturePending{false};
+static std::mutex _captureMutex;
 
 static void _zt_lwip_execute(ZtLwipCall* c)
 {
@@ -64,11 +70,20 @@ static void _zt_lwip_execute(ZtLwipCall* c)
 	}
 }
 
+static void _zt_capture_tcpip_cb(void* /*arg*/)
+{
+	_ztTcpipThreadTask.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
+	_capturePending.store(false, std::memory_order_release);
+	if (_captureSemInitialized.load(std::memory_order_acquire)) {
+		sys_sem_signal(&_captureSem);
+	}
+}
+
 static void _zt_lwip_call_cb(void* arg)
 {
 	ZtLwipCall* c = (ZtLwipCall*)arg;
-	if (! _ztTcpipThreadTask) {
-		_ztTcpipThreadTask = xTaskGetCurrentTaskHandle();
+	if (! _ztTcpipThreadTask.load(std::memory_order_acquire)) {
+		_ztTcpipThreadTask.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
 	}
 	_zt_lwip_execute(c);
 	if (c->signalSem) {
@@ -78,7 +93,7 @@ static void _zt_lwip_call_cb(void* arg)
 
 static bool _zt_lwip_current_thread_is_tcpip()
 {
-	TaskHandle_t tcpipTask = (TaskHandle_t)_ztTcpipThreadTask;
+	TaskHandle_t tcpipTask = _ztTcpipThreadTask.load(std::memory_order_acquire);
 	return (tcpipTask && (xTaskGetCurrentTaskHandle() == tcpipTask));
 }
 
@@ -108,24 +123,33 @@ static bool _run_sync(ZtLwipCall& c)
 
 bool ESP32LwIPGlue::captureTcpipThread(uint32_t timeoutMs)
 {
-	if (_ztTcpipThreadTask) {
+	if (_ztTcpipThreadTask.load(std::memory_order_acquire) != nullptr) {
 		return true;
 	}
-	ZtLwipCall c;
-	memset(&c, 0, sizeof(c));
-	c.op = ZtLwipCall::OP_NOOP;
-	if (sys_sem_new(&c.sem, 0) != ERR_OK) {
-		return false;
+
+	std::lock_guard<std::mutex> lock(_captureMutex);
+
+	if (_ztTcpipThreadTask.load(std::memory_order_acquire) != nullptr) {
+		return true;
 	}
-	c.signalSem = true;
-	c.rc = ERR_INPROGRESS;
-	if (tcpip_callback(&_zt_lwip_call_cb, &c) != ERR_OK) {
-		sys_sem_free(&c.sem);
-		return false;
+
+	if (! _captureSemInitialized.load(std::memory_order_acquire)) {
+		if (sys_sem_new(&_captureSem, 0) != ERR_OK) {
+			return false;
+		}
+		_captureSemInitialized.store(true, std::memory_order_release);
 	}
-	const u32_t waited = sys_arch_sem_wait(&c.sem, timeoutMs ? timeoutMs : 1000);
-	sys_sem_free(&c.sem);
-	return ((waited != SYS_ARCH_TIMEOUT) && (_ztTcpipThreadTask != (TaskHandle_t)0) && (c.rc == ERR_OK));
+
+	if (! _capturePending.load(std::memory_order_acquire)) {
+		_capturePending.store(true, std::memory_order_release);
+		if (tcpip_callback(&_zt_capture_tcpip_cb, (void*)0) != ERR_OK) {
+			_capturePending.store(false, std::memory_order_release);
+			return false;
+		}
+	}
+
+	const u32_t waited = sys_arch_sem_wait(&_captureSem, timeoutMs ? timeoutMs : 1000);
+	return ((waited != SYS_ARCH_TIMEOUT) && (_ztTcpipThreadTask.load(std::memory_order_acquire) != (TaskHandle_t)0));
 }
 
 bool ESP32LwIPGlue::addNetif(struct netif* n, void* state, netif_init_fn initFn)
