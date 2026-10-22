@@ -5,14 +5,10 @@ get_filename_component(ZT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../ZeroTierOne" ABS
 file(GLOB ZT_ALL_SRCS ${ZT_ROOT}/node/*.cpp)
 list(FILTER ZT_ALL_SRCS EXCLUDE REGEX ".*(AES_aesni|AES_armcrypto|Bond|Metrics|Trace)\.cpp$")
 list(APPEND ZT_ALL_SRCS
-    ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_mutex.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_utils_esp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_metrics_esp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_bond_esp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_trace_esp.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_storage_esp.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_socket_esp.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_tap_esp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_osutils_esp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_route_debug_esp.cpp
 )
