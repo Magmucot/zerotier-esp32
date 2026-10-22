@@ -226,12 +226,9 @@ void ESP32LitePort::stop()
 #ifdef ESP_PLATFORM
 	if (_wireRxTask) {
 		if (_wireRxStopped) {
-			if (xSemaphoreTake(_wireRxStopped, pdMS_TO_TICKS(1000)) != pdTRUE) {
-				vTaskDelete(_wireRxTask);
+			if (xSemaphoreTake(_wireRxStopped, pdMS_TO_TICKS(1500)) != pdTRUE) {
+				ESP_LOGW("ZT_PORT", "wireRxTask did not exit within timeout, waiting for natural termination");
 			}
-		}
-		else {
-			vTaskDelete(_wireRxTask);
 		}
 		_wireRxTask = (TaskHandle_t)0;
 	}
@@ -437,7 +434,7 @@ void ESP32LitePort::_stateKey(enum ZT_StateObjectType type, const uint64_t id[2]
 		default: prefix = 'o'; break;
 	}
 	/* 1 prefix + 13 hex digits = 14 chars, safely below NVS's 15-char key limit. */
-	snprintf(out, outLen, "%c%013llx", prefix, (unsigned long long)(h & 0x1ffffffffffffULL));
+	snprintf(out, outLen, "%c%013llx", prefix, (unsigned long long)(h & 0xfffffffffffffULL));
 }
 
 int ESP32LitePort::_statePut(enum ZT_StateObjectType type, const uint64_t id[2], const void* data, int len)

@@ -15,7 +15,7 @@
 #include <stdio.h>
 
 #ifndef ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE
-#define ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE 1
+#define ZT_ESP32_STEP54_NETCONF_ALLOC_TRACE 0
 #endif
 
 namespace ZeroTier {

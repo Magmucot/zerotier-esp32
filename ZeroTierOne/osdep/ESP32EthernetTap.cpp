@@ -165,6 +165,14 @@ std::vector<InetAddress> ESP32EthernetTap::ips() const
 void ESP32EthernetTap::put(const MAC& from, const MAC& to, unsigned int etherType, const void* data, unsigned int len)
 {
 #ifdef ESP_PLATFORM
+	if (len > _mtu) {
+		fprintf(stderr, "[ZT_ESP32_TAP] put drop reason=frame_too_large len=%u mtu=%u\n", len, _mtu);
+		return;
+	}
+	if ((!to.isBroadcast()) && (!to.isMulticast()) && (to != _mac)) {
+		fprintf(stderr, "[ZT_ESP32_TAP] put drop reason=dest_mac_mismatch\n");
+		return;
+	}
 	const unsigned int frameLen = 14 + len;
 	struct pbuf* p = pbuf_alloc(PBUF_RAW, frameLen, PBUF_RAM);
 	if (! p) {

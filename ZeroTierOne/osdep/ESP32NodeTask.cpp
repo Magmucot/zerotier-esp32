@@ -47,15 +47,20 @@ ESP32NodeTask::ESP32NodeTask(ZT_Node* node, void* tptr, ESP32NetworkState* netwo
 
 ESP32NodeTask::~ESP32NodeTask()
 {
-	stop(1000);
+	const bool stopped = stop(1000);
 #ifdef ESP_PLATFORM
-	if (_queue) {
-		vQueueDelete(_queue);
-		_queue = (QueueHandle_t)0;
+	if (stopped) {
+		if (_queue) {
+			vQueueDelete(_queue);
+			_queue = (QueueHandle_t)0;
+		}
+		if (_stopped) {
+			vSemaphoreDelete(_stopped);
+			_stopped = (SemaphoreHandle_t)0;
+		}
 	}
-	if (_stopped) {
-		vSemaphoreDelete(_stopped);
-		_stopped = (SemaphoreHandle_t)0;
+	if (_defaultTask == this) {
+		_defaultTask = (ESP32NodeTask*)0;
 	}
 #endif
 }

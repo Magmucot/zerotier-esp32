@@ -67,11 +67,8 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
-    -Og
-    -g3
-    -fno-inline
-    -fno-optimize-sibling-calls
-    -fno-omit-frame-pointer
+    -O2
+    -g
     -fno-rtti
     -fexceptions
     -DZT_ESP32_ALLOW_PROVISIONED_IDENTITY=1
