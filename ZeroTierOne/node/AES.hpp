@@ -15,10 +15,10 @@
 #include <stdio.h>
 #endif
 #ifndef ZT_ESP32_STEP47_DEARMOR_DIVERGENCE
-#define ZT_ESP32_STEP47_DEARMOR_DIVERGENCE 1
+#define ZT_ESP32_STEP47_DEARMOR_DIVERGENCE 0
 #endif
 #ifndef ZT_ESP32_STEP49_GMAC_TRACE
-#define ZT_ESP32_STEP49_GMAC_TRACE 1
+#define ZT_ESP32_STEP49_GMAC_TRACE 0
 #endif
 
 // Uncomment to disable all hardware acceleration (usually for testing)
@@ -35,7 +35,7 @@
 #define ZT_INLINE inline
 #endif
 #ifndef ZT_ESP32_STEP41_DEBUG_GMACSIV
-#define ZT_ESP32_STEP41_DEBUG_GMACSIV 1
+#define ZT_ESP32_STEP41_DEBUG_GMACSIV 0
 #endif
 
 namespace ZeroTier {

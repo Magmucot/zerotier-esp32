@@ -16,7 +16,7 @@
 #include "Trace.hpp"
 #include <stdio.h>
 #ifndef ZT_ESP32_STEP45_DEBUG_KEYS
-#define ZT_ESP32_STEP45_DEBUG_KEYS 1
+#define ZT_ESP32_STEP45_DEBUG_KEYS 0
 #endif
 
 namespace ZeroTier {
