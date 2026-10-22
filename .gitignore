@@ -35,3 +35,7 @@ ZeroTierOne/zerotier_dump.txt
 *.old
 components/zerotier_node/CMakeLists.txt.bak-*
 AGENTS.md
+
+# Agent team directories
+.agents/
+ORIGINAL_REQUEST.md
