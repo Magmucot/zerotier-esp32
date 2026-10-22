@@ -79,10 +79,36 @@ extern "C" int zt_wire_send_impl(ZT_Node *node, void *uptr, void *tptr,
     const void *data, unsigned int len,
     unsigned int ttl)
 {
-    if (zt_sock < 0) return 0;
+    if (zt_sock < 0 || !addr || !data) return -1;
+    (void)node; (void)uptr; (void)tptr; (void)localSocket;
+
+    if (ttl) {
+        if (addr->ss_family == AF_INET) {
+            setsockopt(zt_sock, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl));
+        }
+#ifdef IPV6_UNICAST_HOPS
+        else if (addr->ss_family == AF_INET6) {
+            setsockopt(zt_sock, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &ttl, sizeof(ttl));
+        }
+#endif
+    }
+
     socklen_t addrlen = (addr->ss_family == AF_INET6)
         ? sizeof(struct sockaddr_in6)
         : sizeof(struct sockaddr_in);
-    sendto(zt_sock, data, len, 0, (const struct sockaddr *)addr, addrlen);
-    return 0;
+    ssize_t sent = sendto(zt_sock, data, len, 0, (const struct sockaddr *)addr, addrlen);
+
+    if (ttl) {
+        int defaultTtl = 64;
+        if (addr->ss_family == AF_INET) {
+            setsockopt(zt_sock, IPPROTO_IP, IP_TTL, &defaultTtl, sizeof(defaultTtl));
+        }
+#ifdef IPV6_UNICAST_HOPS
+        else if (addr->ss_family == AF_INET6) {
+            setsockopt(zt_sock, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &defaultTtl, sizeof(defaultTtl));
+        }
+#endif
+    }
+
+    return (sent == (ssize_t)len) ? 0 : -1;
 }
