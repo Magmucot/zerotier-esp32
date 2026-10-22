@@ -5,6 +5,7 @@ build-s3/
 
 # Local agent/session state
 .claude/
+.serena/
 
 # Local archive/scratch
 old/
