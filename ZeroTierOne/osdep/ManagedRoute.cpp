@@ -661,7 +661,7 @@ void ManagedRoute::remove()
 #endif	 // __LINUX__ ----------------------------------------------------------
 
 #ifdef ESP_PLATFORM  // ---------------------------------------------------------
-		ESP32NetLink::getInstance().delRoute(r->first, _via, _src, (_via) ? (const char*)0 : _device);
+		ESP32NetLink::getInstance().delRoute(r->first, _via, _src, _device);
 #endif	 // ESP_PLATFORM --------------------------------------------------------
 
 #ifdef __WINDOWS__	 // --------------------------------------------------------

@@ -319,6 +319,17 @@ int ESP32LitePort::wirePacketSendCallback(ZT_Node*, void* userPtr, void*, int64_
 	}
 	const socklen_t slen = (remoteAddress->ss_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
 	const int rc = (int)sendto(self->_udpSocket, packetData, packetLength, 0, (const struct sockaddr*)remoteAddress, slen);
+	if (ttl) {
+		int defaultTtl = 64;
+		if (remoteAddress->ss_family == AF_INET) {
+			setsockopt(self->_udpSocket, IPPROTO_IP, IP_TTL, &defaultTtl, sizeof(defaultTtl));
+		}
+#ifdef IPV6_UNICAST_HOPS
+		else if (remoteAddress->ss_family == AF_INET6) {
+			setsockopt(self->_udpSocket, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &defaultTtl, sizeof(defaultTtl));
+		}
+#endif
+	}
 	if (rc == (int)packetLength) {
 		return 0;
 	}
