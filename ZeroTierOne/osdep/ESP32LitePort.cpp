@@ -517,7 +517,7 @@ void ESP32LitePort::_wireRxLoop()
 	while (! _stopping) {
 		ESP32FramePool::Buffer* b = ESP32FramePool::instance().acquireEmpty(ZT_ESP32_MAX_WIRE_PACKET_SIZE, 50);
 		if (! b) {
-			ESP_LOGW(ZT_ESP32_PORT_TAG, "wire RX drop reason=frame_pool_empty");
+			ESP_LOGD(ZT_ESP32_PORT_TAG, "wire RX drop reason=frame_pool_empty");
 			vTaskDelay(pdMS_TO_TICKS(10));
 			continue;
 		}

@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "ZeroTierOne.h"
+#include "ESP32NetLink.hpp"
 
 static const char *TAG = "zt_main";
 
@@ -21,7 +22,19 @@ extern "C" void zt_socket_start_recv(ZT_Node *node, void *uptr);
 
 static int zt_path_check(ZT_Node *node, void *uptr, void *tptr,
     uint64_t ztaddr, int64_t localSocket,
-    const struct sockaddr_storage *addr) { return 1; }
+    const struct sockaddr_storage *addr)
+{
+    (void)node; (void)uptr; (void)tptr; (void)ztaddr; (void)localSocket;
+    if (addr && (addr->ss_family == AF_INET)) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
+        ZeroTier::ESP32NetLink::LookupResult lr = ZeroTier::ESP32NetLink::getInstance().lookupIpv4(sin->sin_addr.s_addr);
+        if (lr.matched && lr.supported) {
+            ESP_LOGW(TAG, "zt_path_check reject reason=zt_over_zt");
+            return 0;
+        }
+    }
+    return 1;
+}
 
 static int zt_path_lookup(ZT_Node *node, void *uptr, void *tptr,
     uint64_t ztaddr, int family,
