@@ -19,6 +19,8 @@
 #include "Topology.hpp"
 
 #include <algorithm>
+#include <memory>
+#include <new>
 
 namespace ZeroTier {
 
@@ -155,9 +157,276 @@ std::vector<Address> Multicaster::getMembers(uint64_t nwid, const MulticastGroup
 	return ls;
 }
 
+__attribute__((noinline)) static bool _sendToReplicator(
+	const RuntimeEnvironment* RR,
+	void* tPtr,
+	int64_t now,
+	const SharedPtr<Network>& network,
+	const MulticastGroup& mg,
+	const MAC& src,
+	unsigned int etherType,
+	const void* data,
+	unsigned int len)
+{
+	std::unique_ptr<Address[]> multicastReplicators(new (std::nothrow) Address[ZT_MAX_NETWORK_SPECIALISTS]);
+	if (!multicastReplicators) {
+		return false;
+	}
+	const unsigned int multicastReplicatorCount = network->config().multicastReplicators(multicastReplicators.get());
+	if (multicastReplicatorCount) {
+		if (std::find(multicastReplicators.get(), multicastReplicators.get() + multicastReplicatorCount, RR->identity.address()) == (multicastReplicators.get() + multicastReplicatorCount)) {
+			SharedPtr<Peer> bestMulticastReplicator;
+			SharedPtr<Path> bestMulticastReplicatorPath;
+			unsigned int bestMulticastReplicatorLatency = 0xffff;
+			for (unsigned int i = 0; i < multicastReplicatorCount; ++i) {
+				const SharedPtr<Peer> p(RR->topology->getPeerNoCache(multicastReplicators[i]));
+				if ((p) && (p->isAlive(now))) {
+					const SharedPtr<Path> pp(p->getAppropriatePath(now, false));
+					if ((pp) && (pp->latency() < bestMulticastReplicatorLatency)) {
+						bestMulticastReplicatorLatency = pp->latency();
+						bestMulticastReplicatorPath = pp;
+						bestMulticastReplicator = p;
+					}
+				}
+			}
+			if (bestMulticastReplicator) {
+				std::unique_ptr<Packet> outp(new (std::nothrow) Packet(bestMulticastReplicator->address(), RR->identity.address(), Packet::VERB_MULTICAST_FRAME));
+				if (!outp) {
+					return false;
+				}
+				outp->append((uint64_t)network->id());
+				outp->append((uint8_t)0x0c);	  // includes source MAC | please replicate
+				((src) ? src : MAC(RR->identity.address(), network->id())).appendTo(*outp);
+				mg.mac().appendTo(*outp);
+				outp->append((uint32_t)mg.adi());
+				outp->append((uint16_t)etherType);
+				outp->append(data, len);
+				outp->compress();
+				outp->armor(bestMulticastReplicator->key(), true, false, bestMulticastReplicator->aesKeysIfSupported(), bestMulticastReplicator->identity());
+				Metrics::pkt_multicast_frame_out++;
+				bestMulticastReplicatorPath->send(RR, tPtr, outp->data(), outp->size(), now);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+__attribute__((noinline)) static void _doExplicitGather(
+	const RuntimeEnvironment* RR,
+	void* tPtr,
+	int64_t now,
+	const SharedPtr<Network>& network,
+	const MulticastGroup& mg,
+	unsigned int membersCount,
+	unsigned int gatherLimit)
+{
+	Address explicitGatherPeers[16];
+	unsigned int numExplicitGatherPeers = 0;
+
+	SharedPtr<Peer> bestRoot(RR->topology->getUpstreamPeer(network->id()));
+	if (bestRoot) {
+		explicitGatherPeers[numExplicitGatherPeers++] = bestRoot->address();
+	}
+
+	explicitGatherPeers[numExplicitGatherPeers++] = network->controller();
+
+	std::unique_ptr<Address[]> ac(new (std::nothrow) Address[ZT_MAX_NETWORK_SPECIALISTS]);
+	std::unique_ptr<unsigned int[]> shuffled(new (std::nothrow) unsigned int[ZT_MAX_NETWORK_SPECIALISTS]);
+	if (ac && shuffled) {
+		const unsigned int accnt = network->config().alwaysContactAddresses(ac.get());
+		for (unsigned int i = 0; i < accnt; ++i) {
+			shuffled[i] = i;
+		}
+		for (unsigned int i = 0, k = accnt >> 1; i < k; ++i) {
+			const uint64_t x = RR->node->prng();
+			const unsigned int x1 = shuffled[(unsigned int)x % accnt];
+			const unsigned int x2 = shuffled[(unsigned int)(x >> 32) % accnt];
+			const unsigned int tmp = shuffled[x1];
+			shuffled[x1] = shuffled[x2];
+			shuffled[x2] = tmp;
+		}
+		for (unsigned int i = 0; i < accnt; ++i) {
+			explicitGatherPeers[numExplicitGatherPeers++] = ac[shuffled[i]];
+			if (numExplicitGatherPeers == 16) {
+				break;
+			}
+		}
+	}
+
+	{
+		const uint64_t macint2 = mg.mac().toInt();
+		char mbuf2[24];
+		snprintf(mbuf2, sizeof(mbuf2), "%02x:%02x:%02x:%02x:%02x:%02x",
+		         (unsigned)((macint2>>40)&0xff),(unsigned)((macint2>>32)&0xff),
+		         (unsigned)((macint2>>24)&0xff),(unsigned)((macint2>>16)&0xff),
+		         (unsigned)((macint2>>8)&0xff), (unsigned)(macint2&0xff));
+		printf("[ZT_MULTICAST_LOCAL_STATE] node_name=%s node_id=0x%llx zt_managed_ip=%s nwid=0x%llx event=MULTICAST_LOCAL_STATE mac=%s adi=%u adi_hex=0x%08x group_key=%s/%u local_registered=yes known_member_count=%u source=local_mc_db\n",
+		       _zt_mc_node_name(RR->identity.address().toInt()),
+		       (unsigned long long)RR->identity.address().toInt(),
+		       _zt_mc_managed_ip(RR->identity.address().toInt()),
+		       (unsigned long long)network->id(),
+		       mbuf2, (unsigned)mg.adi(), (unsigned)mg.adi(),
+		       mbuf2, (unsigned)mg.adi(),
+		       membersCount);
+	}
+	for (unsigned int k = 0; k < numExplicitGatherPeers; ++k) {
+		const CertificateOfMembership* com = (network) ? ((network->config().com) ? &(network->config().com) : (const CertificateOfMembership*)0) : (const CertificateOfMembership*)0;
+		std::unique_ptr<Packet> outp(new (std::nothrow) Packet(explicitGatherPeers[k], RR->identity.address(), Packet::VERB_MULTICAST_GATHER));
+		if (!outp) {
+			continue;
+		}
+		outp->append(network->id());
+		outp->append((uint8_t)((com) ? 0x01 : 0x00));
+		mg.mac().appendTo(*outp);
+		outp->append((uint32_t)mg.adi());
+		outp->append((uint32_t)gatherLimit);
+		if (com) {
+			com->serialize(*outp);
+		}
+		RR->node->expectReplyTo(outp->packetId());
+		{
+			const uint64_t macint3 = mg.mac().toInt();
+			char mbuf3[24];
+			snprintf(mbuf3, sizeof(mbuf3), "%02x:%02x:%02x:%02x:%02x:%02x",
+			         (unsigned)((macint3>>40)&0xff),(unsigned)((macint3>>32)&0xff),
+			         (unsigned)((macint3>>24)&0xff),(unsigned)((macint3>>16)&0xff),
+			         (unsigned)((macint3>>8)&0xff), (unsigned)(macint3&0xff));
+			printf("[ZT_MULTICAST_GATHER_TX] node_name=%s node_id=0x%llx zt_managed_ip=%s nwid=0x%llx event=MULTICAST_GATHER_TX mac=%s adi=%u adi_hex=0x%08x group_key=%s/%u dest=0x%llx gatherLimit=%u trigger=multicast result=sent reason=members_needed\n",
+			       _zt_mc_node_name(RR->identity.address().toInt()),
+			       (unsigned long long)RR->identity.address().toInt(),
+			       _zt_mc_managed_ip(RR->identity.address().toInt()),
+			       (unsigned long long)network->id(),
+			       mbuf3, (unsigned)mg.adi(), (unsigned)mg.adi(),
+			       mbuf3, (unsigned)mg.adi(),
+			       (unsigned long long)explicitGatherPeers[k].toInt(),
+			       gatherLimit);
+		}
+		RR->sw->send(tPtr, *outp, true, network->id(), ZT_QOS_NO_FLOW);
+		Metrics::pkt_multicast_gather_out++;
+	}
+}
+
+template <typename GS>
+__attribute__((noinline)) static void _sendDirect(
+	const RuntimeEnvironment* RR,
+	void* tPtr,
+	int64_t now,
+	const SharedPtr<Network>& network,
+	const Address& origin,
+	const MulticastGroup& mg,
+	const MAC& src,
+	unsigned int etherType,
+	const void* data,
+	unsigned int len,
+	GS& gs,
+	const unsigned long* indexes,
+	unsigned int limit)
+{
+	std::unique_ptr<Address[]> activeBridges(new (std::nothrow) Address[ZT_MAX_NETWORK_SPECIALISTS]);
+	const unsigned int activeBridgeCount = (activeBridges) ? network->config().activeBridges(activeBridges.get()) : 0;
+
+	// Skip queue if we already have enough members to complete the send operation
+	std::unique_ptr<OutboundMulticast> out(new (std::nothrow) OutboundMulticast());
+	if (!out) {
+		return;
+	}
+
+	out->init(
+		RR,
+		now,
+		network->id(),
+		false,
+		limit,
+		1,	 // we'll still gather a little from peers to keep multicast list fresh
+		src,
+		mg,
+		etherType,
+		data,
+		len);
+
+	unsigned int count = 0;
+
+	for (unsigned int i = 0; i < activeBridgeCount; ++i) {
+		if ((activeBridges[i] != RR->identity.address()) && (activeBridges[i] != origin)) {
+			out->sendOnly(RR, tPtr, activeBridges[i]);	// optimization: don't use dedup log if it's a one-pass send
+		}
+	}
+
+	unsigned long idx = 0;
+	while ((count < limit) && (idx < gs.members.size())) {
+		const Address ma(gs.members[indexes[idx++]].address);
+		if ((std::find(activeBridges.get(), activeBridges.get() + activeBridgeCount, ma) == (activeBridges.get() + activeBridgeCount)) && (ma != origin)) {
+			out->sendOnly(RR, tPtr, ma);	  // optimization: don't use dedup log if it's a one-pass send
+			++count;
+		}
+	}
+}
+
+template <typename GS>
+__attribute__((noinline)) static void _sendQueued(
+	const RuntimeEnvironment* RR,
+	void* tPtr,
+	int64_t now,
+	const SharedPtr<Network>& network,
+	const Address& origin,
+	const MulticastGroup& mg,
+	const MAC& src,
+	unsigned int etherType,
+	const void* data,
+	unsigned int len,
+	GS& gs,
+	const unsigned long* indexes,
+	unsigned int limit)
+{
+	while (gs.txQueue.size() >= ZT_TX_QUEUE_SIZE) {
+		gs.txQueue.pop_front();
+	}
+
+	const unsigned int gatherLimit = (limit - (unsigned int)gs.members.size()) + 1;
+
+	int timerScale = RR->node->lowBandwidthModeEnabled() ? 3 : 1;
+	if ((gs.members.empty()) || ((now - gs.lastExplicitGather) >= (ZT_MULTICAST_EXPLICIT_GATHER_DELAY * timerScale))) {
+		gs.lastExplicitGather = now;
+		_doExplicitGather(RR, tPtr, now, network, mg, (unsigned int)gs.members.size(), gatherLimit);
+	}
+
+	gs.txQueue.emplace_back();
+	OutboundMulticast& out = gs.txQueue.back();
+
+	out.init(RR, now, network->id(), false, limit, gatherLimit, src, mg, etherType, data, len);
+
+	if (origin) {
+		out.logAsSent(origin);
+	}
+
+	std::unique_ptr<Address[]> activeBridges(new (std::nothrow) Address[ZT_MAX_NETWORK_SPECIALISTS]);
+	const unsigned int activeBridgeCount = (activeBridges) ? network->config().activeBridges(activeBridges.get()) : 0;
+
+	unsigned int count = 0;
+
+	for (unsigned int i = 0; i < activeBridgeCount; ++i) {
+		if (activeBridges[i] != RR->identity.address()) {
+			out.sendAndLog(RR, tPtr, activeBridges[i]);
+			if (++count >= limit) {
+				break;
+			}
+		}
+	}
+
+	unsigned long idx = 0;
+	while ((count < limit) && (idx < gs.members.size())) {
+		Address ma(gs.members[indexes[idx++]].address);
+		if (std::find(activeBridges.get(), activeBridges.get() + activeBridgeCount, ma) == (activeBridges.get() + activeBridgeCount)) {
+			out.sendAndLog(RR, tPtr, ma);
+			++count;
+		}
+	}
+}
+
 void Multicaster::send(void* tPtr, int64_t now, const SharedPtr<Network>& network, const Address& origin, const MulticastGroup& mg, const MAC& src, unsigned int etherType, const void* data, unsigned int len)
 {
-	unsigned long idxbuf[4096];
+	unsigned long idxbuf[32];
 	unsigned long* indexes = idxbuf;
 
 	// If we're in hub-and-spoke designated multicast replication mode, see if we
@@ -169,40 +438,8 @@ void Multicaster::send(void* tPtr, int64_t now, const SharedPtr<Network>& networ
 	// complexity than the fix is probably worth. Bridges are generally high
 	// bandwidth nodes.
 	if (! network->config().isActiveBridge(RR->identity.address())) {
-		Address multicastReplicators[ZT_MAX_NETWORK_SPECIALISTS];
-		const unsigned int multicastReplicatorCount = network->config().multicastReplicators(multicastReplicators);
-		if (multicastReplicatorCount) {
-			if (std::find(multicastReplicators, multicastReplicators + multicastReplicatorCount, RR->identity.address()) == (multicastReplicators + multicastReplicatorCount)) {
-				SharedPtr<Peer> bestMulticastReplicator;
-				SharedPtr<Path> bestMulticastReplicatorPath;
-				unsigned int bestMulticastReplicatorLatency = 0xffff;
-				for (unsigned int i = 0; i < multicastReplicatorCount; ++i) {
-					const SharedPtr<Peer> p(RR->topology->getPeerNoCache(multicastReplicators[i]));
-					if ((p) && (p->isAlive(now))) {
-						const SharedPtr<Path> pp(p->getAppropriatePath(now, false));
-						if ((pp) && (pp->latency() < bestMulticastReplicatorLatency)) {
-							bestMulticastReplicatorLatency = pp->latency();
-							bestMulticastReplicatorPath = pp;
-							bestMulticastReplicator = p;
-						}
-					}
-				}
-				if (bestMulticastReplicator) {
-					Packet outp(bestMulticastReplicator->address(), RR->identity.address(), Packet::VERB_MULTICAST_FRAME);
-					outp.append((uint64_t)network->id());
-					outp.append((uint8_t)0x0c);	  // includes source MAC | please replicate
-					((src) ? src : MAC(RR->identity.address(), network->id())).appendTo(outp);
-					mg.mac().appendTo(outp);
-					outp.append((uint32_t)mg.adi());
-					outp.append((uint16_t)etherType);
-					outp.append(data, len);
-					outp.compress();
-					outp.armor(bestMulticastReplicator->key(), true, false, bestMulticastReplicator->aesKeysIfSupported(), bestMulticastReplicator->identity());
-					Metrics::pkt_multicast_frame_out++;
-					bestMulticastReplicatorPath->send(RR, tPtr, outp.data(), outp.size(), now);
-					return;
-				}
-			}
+		if (_sendToReplicator(RR, tPtr, now, network, mg, src, etherType, data, len)) {
+			return;
 		}
 	}
 
@@ -213,7 +450,10 @@ void Multicaster::send(void* tPtr, int64_t now, const SharedPtr<Network>& networ
 		if (! gs.members.empty()) {
 			// Allocate a memory buffer if group is monstrous
 			if (gs.members.size() > (sizeof(idxbuf) / sizeof(unsigned long))) {
-				indexes = new unsigned long[gs.members.size()];
+				indexes = new (std::nothrow) unsigned long[gs.members.size()];
+				if (!indexes) {
+					return;
+				}
 			}
 
 			// Generate a random permutation of member indexes
@@ -228,164 +468,13 @@ void Multicaster::send(void* tPtr, int64_t now, const SharedPtr<Network>& networ
 			}
 		}
 
-		Address activeBridges[ZT_MAX_NETWORK_SPECIALISTS];
-		const unsigned int activeBridgeCount = network->config().activeBridges(activeBridges);
 		const unsigned int limit = network->config().multicastLimit;
 
 		if (gs.members.size() >= limit) {
-			// Skip queue if we already have enough members to complete the send operation
-			OutboundMulticast out;
-
-			out.init(
-				RR,
-				now,
-				network->id(),
-				false,
-				limit,
-				1,	 // we'll still gather a little from peers to keep multicast list fresh
-				src,
-				mg,
-				etherType,
-				data,
-				len);
-
-			unsigned int count = 0;
-
-			for (unsigned int i = 0; i < activeBridgeCount; ++i) {
-				if ((activeBridges[i] != RR->identity.address()) && (activeBridges[i] != origin)) {
-					out.sendOnly(RR, tPtr, activeBridges[i]);	// optimization: don't use dedup log if it's a one-pass send
-				}
-			}
-
-			unsigned long idx = 0;
-			while ((count < limit) && (idx < gs.members.size())) {
-				const Address ma(gs.members[indexes[idx++]].address);
-				if ((std::find(activeBridges, activeBridges + activeBridgeCount, ma) == (activeBridges + activeBridgeCount)) && (ma != origin)) {
-					out.sendOnly(RR, tPtr, ma);	  // optimization: don't use dedup log if it's a one-pass send
-					++count;
-				}
-			}
+			_sendDirect(RR, tPtr, now, network, origin, mg, src, etherType, data, len, gs, indexes, limit);
 		}
 		else {
-			while (gs.txQueue.size() >= ZT_TX_QUEUE_SIZE) {
-				gs.txQueue.pop_front();
-			}
-
-			const unsigned int gatherLimit = (limit - (unsigned int)gs.members.size()) + 1;
-
-			int timerScale = RR->node->lowBandwidthModeEnabled() ? 3 : 1;
-			if ((gs.members.empty()) || ((now - gs.lastExplicitGather) >= (ZT_MULTICAST_EXPLICIT_GATHER_DELAY * timerScale))) {
-				gs.lastExplicitGather = now;
-
-				Address explicitGatherPeers[16];
-				unsigned int numExplicitGatherPeers = 0;
-
-				SharedPtr<Peer> bestRoot(RR->topology->getUpstreamPeer(network->id()));
-				if (bestRoot) {
-					explicitGatherPeers[numExplicitGatherPeers++] = bestRoot->address();
-				}
-
-				explicitGatherPeers[numExplicitGatherPeers++] = network->controller();
-
-				Address ac[ZT_MAX_NETWORK_SPECIALISTS];
-				const unsigned int accnt = network->config().alwaysContactAddresses(ac);
-				unsigned int shuffled[ZT_MAX_NETWORK_SPECIALISTS];
-				for (unsigned int i = 0; i < accnt; ++i) {
-					shuffled[i] = i;
-				}
-				for (unsigned int i = 0, k = accnt >> 1; i < k; ++i) {
-					const uint64_t x = RR->node->prng();
-					const unsigned int x1 = shuffled[(unsigned int)x % accnt];
-					const unsigned int x2 = shuffled[(unsigned int)(x >> 32) % accnt];
-					const unsigned int tmp = shuffled[x1];
-					shuffled[x1] = shuffled[x2];
-					shuffled[x2] = tmp;
-				}
-				for (unsigned int i = 0; i < accnt; ++i) {
-					explicitGatherPeers[numExplicitGatherPeers++] = ac[shuffled[i]];
-					if (numExplicitGatherPeers == 16) {
-						break;
-					}
-				}
-
-				{
-					const uint64_t macint2 = mg.mac().toInt();
-					char mbuf2[24];
-					snprintf(mbuf2, sizeof(mbuf2), "%02x:%02x:%02x:%02x:%02x:%02x",
-					         (unsigned)((macint2>>40)&0xff),(unsigned)((macint2>>32)&0xff),
-					         (unsigned)((macint2>>24)&0xff),(unsigned)((macint2>>16)&0xff),
-					         (unsigned)((macint2>>8)&0xff), (unsigned)(macint2&0xff));
-					printf("[ZT_MULTICAST_LOCAL_STATE] node_name=%s node_id=0x%llx zt_managed_ip=%s nwid=0x%llx event=MULTICAST_LOCAL_STATE mac=%s adi=%u adi_hex=0x%08x group_key=%s/%u local_registered=yes known_member_count=%u source=local_mc_db\n",
-					       _zt_mc_node_name(RR->identity.address().toInt()),
-					       (unsigned long long)RR->identity.address().toInt(),
-					       _zt_mc_managed_ip(RR->identity.address().toInt()),
-					       (unsigned long long)network->id(),
-					       mbuf2, (unsigned)mg.adi(), (unsigned)mg.adi(),
-					       mbuf2, (unsigned)mg.adi(),
-					       (unsigned int)gs.members.size());
-				}
-				for (unsigned int k = 0; k < numExplicitGatherPeers; ++k) {
-					const CertificateOfMembership* com = (network) ? ((network->config().com) ? &(network->config().com) : (const CertificateOfMembership*)0) : (const CertificateOfMembership*)0;
-					Packet outp(explicitGatherPeers[k], RR->identity.address(), Packet::VERB_MULTICAST_GATHER);
-					outp.append(network->id());
-					outp.append((uint8_t)((com) ? 0x01 : 0x00));
-					mg.mac().appendTo(outp);
-					outp.append((uint32_t)mg.adi());
-					outp.append((uint32_t)gatherLimit);
-					if (com) {
-						com->serialize(outp);
-					}
-					RR->node->expectReplyTo(outp.packetId());
-					{
-						const uint64_t macint3 = mg.mac().toInt();
-						char mbuf3[24];
-						snprintf(mbuf3, sizeof(mbuf3), "%02x:%02x:%02x:%02x:%02x:%02x",
-						         (unsigned)((macint3>>40)&0xff),(unsigned)((macint3>>32)&0xff),
-						         (unsigned)((macint3>>24)&0xff),(unsigned)((macint3>>16)&0xff),
-						         (unsigned)((macint3>>8)&0xff), (unsigned)(macint3&0xff));
-						printf("[ZT_MULTICAST_GATHER_TX] node_name=%s node_id=0x%llx zt_managed_ip=%s nwid=0x%llx event=MULTICAST_GATHER_TX mac=%s adi=%u adi_hex=0x%08x group_key=%s/%u dest=0x%llx gatherLimit=%u trigger=multicast result=sent reason=members_needed\n",
-						       _zt_mc_node_name(RR->identity.address().toInt()),
-						       (unsigned long long)RR->identity.address().toInt(),
-						       _zt_mc_managed_ip(RR->identity.address().toInt()),
-						       (unsigned long long)network->id(),
-						       mbuf3, (unsigned)mg.adi(), (unsigned)mg.adi(),
-						       mbuf3, (unsigned)mg.adi(),
-						       (unsigned long long)explicitGatherPeers[k].toInt(),
-						       gatherLimit);
-					}
-					RR->sw->send(tPtr, outp, true, network->id(), ZT_QOS_NO_FLOW);
-					Metrics::pkt_multicast_gather_out++;
-				}
-			}
-
-			gs.txQueue.push_back(OutboundMulticast());
-			OutboundMulticast& out = gs.txQueue.back();
-
-			out.init(RR, now, network->id(), false, limit, gatherLimit, src, mg, etherType, data, len);
-
-			if (origin) {
-				out.logAsSent(origin);
-			}
-
-			unsigned int count = 0;
-
-			for (unsigned int i = 0; i < activeBridgeCount; ++i) {
-				if (activeBridges[i] != RR->identity.address()) {
-					out.sendAndLog(RR, tPtr, activeBridges[i]);
-					if (++count >= limit) {
-						break;
-					}
-				}
-			}
-
-			unsigned long idx = 0;
-			while ((count < limit) && (idx < gs.members.size())) {
-				Address ma(gs.members[indexes[idx++]].address);
-				if (std::find(activeBridges, activeBridges + activeBridgeCount, ma) == (activeBridges + activeBridgeCount)) {
-					out.sendAndLog(RR, tPtr, ma);
-					++count;
-				}
-			}
+			_sendQueued(RR, tPtr, now, network, origin, mg, src, etherType, data, len, gs, indexes, limit);
 		}
 	}
 	catch (...) {
