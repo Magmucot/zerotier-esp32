@@ -73,7 +73,7 @@ Node::Node(void* uptr, void* tptr, const struct ZT_Node_Config* config, const st
 	, _lastMemoizedTraceSettings(0)
 	, _lowBandwidthMode(false)
 {
-	if (callbacks->version != 0) {
+	if (!callbacks || callbacks->version != 0 || !config) {
 		throw ZT_EXCEPTION_INVALID_ARGUMENT;
 	}
 	memcpy(&_cb, callbacks, sizeof(ZT_Node_Callbacks));
@@ -1071,7 +1071,13 @@ static void zt_dbg_log_fatal_trace(const char* reason)
 
 enum ZT_ResultCode ZT_Node_new(ZT_Node** node, const struct ZT_Node_Config* config, void* uptr, void* tptr, const struct ZT_Node_Callbacks* callbacks, int64_t now)
 {
+	if (!node) {
+		return ZT_RESULT_FATAL_ERROR_INVALID_ARGUMENT;
+	}
 	*node = (ZT_Node*)0;
+	if (!callbacks || !config) {
+		return ZT_RESULT_FATAL_ERROR_INVALID_ARGUMENT;
+	}
 	printf("[ZT-NODE] sizeof(ZeroTier::Node)=%lu\n", (unsigned long)sizeof(ZeroTier::Node));
 	try {
 		*node = reinterpret_cast<ZT_Node*>(new ZeroTier::Node(uptr, tptr, config, callbacks, now));

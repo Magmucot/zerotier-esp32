@@ -73,8 +73,9 @@ static void zt_main_task(void *arg)
 
     // Create ZeroTier node
     ZT_Node *node = nullptr;
+    struct ZT_Node_Config cfg = { 0, 0 };
     int64_t now = (int64_t)(esp_timer_get_time() / 1000ULL);
-    ZT_ResultCode rc = ZT_Node_new(&node, nullptr, nullptr, nullptr, &cb, now);
+    ZT_ResultCode rc = ZT_Node_new(&node, &cfg, nullptr, nullptr, &cb, now);
 
     size_t diram_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t psram_after = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
