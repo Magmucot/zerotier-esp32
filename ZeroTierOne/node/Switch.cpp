@@ -1212,6 +1212,7 @@ void Switch::_sendViaSpecificPath(void* tPtr, SharedPtr<Peer> peer, SharedPtr<Pa
 
 	peer->recordOutgoingPacket(viaPath, packet.packetId(), packet.payloadLength(), packet.verb(), flowId, now);
 
+#if defined(ZT_DEBUG_PRINTS) && ZT_DEBUG_PRINTS
 	char pathAddr[64];
 	viaPath->address().toString(pathAddr);
 	printf("[ZT] path send verb=0x%02x ztDest=0x%llx ipport=%s chunk=%u\n",
@@ -1226,6 +1227,7 @@ void Switch::_sendViaSpecificPath(void* tPtr, SharedPtr<Peer> peer, SharedPtr<Pa
 		       pathAddr,
 		       chunkSize);
 	}
+#endif
 	if (viaPath->send(RR, tPtr, packet.data(), chunkSize, now)) {
 		if (chunkSize < packet.size()) {
 			// Too big for one packet, fragment the rest

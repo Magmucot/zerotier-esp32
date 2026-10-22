@@ -184,6 +184,7 @@ bool IncomingPacket::tryDecode(const RuntimeEnvironment* RR, void* tPtr, int32_t
 				inReVerb = (unsigned int)(*this)[ZT_PROTO_VERB_ERROR_IDX_IN_RE_VERB];
 				inRePid = at<uint64_t>(ZT_PROTO_VERB_ERROR_IDX_IN_RE_PACKET_ID);
 			}
+#if defined(ZT_DEBUG_PRINTS) && ZT_DEBUG_PRINTS
 			printf("[ZT_DISPATCH] src=0x%llx dst=0x%llx pktId=0x%llx verb=0x%02x payloadLen=%u size=%u fromController=%u inReVerb=0x%02x inRePid=0x%llx\n",
 			       (unsigned long long)sourceAddress.toInt(),
 			       (unsigned long long)destination().toInt(),
@@ -194,6 +195,7 @@ bool IncomingPacket::tryDecode(const RuntimeEnvironment* RR, void* tPtr, int32_t
 			       (unsigned int)(fromController ? 1 : 0),
 			       (unsigned int)inReVerb,
 			       (unsigned long long)inRePid);
+#endif
 
 			bool r = true;
 			switch (v) {

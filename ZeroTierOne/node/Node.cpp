@@ -88,47 +88,41 @@ Node::Node(void* uptr, void* tptr, const struct ZT_Node_Config* config, const st
 	memset(_expectingRepliesTo, 0, sizeof(_expectingRepliesTo));
 	memset(_lastIdentityVerification, 0, sizeof(_lastIdentityVerification));
 	memset((void*)(&_stats), 0, sizeof(_stats));
+#if defined(ZT_DEBUG_PRINTS) && ZT_DEBUG_PRINTS
 	printf("[ZT_NODE_NEW_DBG] ctor begin\n");
+#endif
 
 	uint64_t idtmp[2];
 	idtmp[0] = 0;
 	idtmp[1] = 0;
 	char tmp[2048];
 	int n = stateObjectGet(tptr, ZT_STATE_OBJECT_IDENTITY_SECRET, idtmp, tmp, sizeof(tmp) - 1);
+#if defined(ZT_DEBUG_PRINTS) && ZT_DEBUG_PRINTS
 	printf("[ZT_NODE_NEW_DBG] id_sec state_get len=%d\n", n);
+#endif
 	if (n > 0) {
 		tmp[n] = (char)0;
-		printf("[ZT_NODE_NEW_DBG] id_sec fromString begin\n");
 		const bool fromStringOk = RR->identity.fromString(tmp);
-		printf("[ZT_NODE_NEW_DBG] id_sec fromString ok=%d\n", (int)fromStringOk);
 		if (fromStringOk) {
 			RR->identity.toString(false, RR->publicIdentityStr);
 			RR->identity.toString(true, RR->secretIdentityStr);
 		}
 		else {
-			printf("[ZT_NODE_NEW_DBG] throw invalid identity (fromString failed)\n");
 			throw ZT_EXCEPTION_INVALID_IDENTITY;
 		}
 
 #if defined(ZT_ESP32_ALLOW_PROVISIONED_IDENTITY) && (ZT_ESP32_ALLOW_PROVISIONED_IDENTITY)
-		printf("[ZT_IDENTITY_POLICY] provisioned identity accepted without local PoW validation\n");
-		printf("[ZT_IDENTITY_POLICY] locallyValidate skipped because ZT_ESP32_ALLOW_PROVISIONED_IDENTITY=1\n");
+		// provisioned identity accepted without local PoW validation
 #else
-		printf("[ZT_NODE_NEW_DBG] id_sec locallyValidate begin\n");
 		const bool localValidateOk = RR->identity.locallyValidate();
-		printf("[ZT_NODE_NEW_DBG] id_sec locallyValidate ok=%d\n", (int)localValidateOk);
 		if (! localValidateOk) {
-			printf("[ZT_NODE_NEW_DBG] throw invalid identity (locallyValidate failed)\n");
 			throw ZT_EXCEPTION_INVALID_IDENTITY;
 		}
 #endif
 	}
 
 	if (n <= 0) {
-		printf("[ZT_NODE_NEW_DBG] no id_sec found, generating identity\n");
-		printf("[ZT_NODE_NEW_DBG] identity.generate begin\n");
 		RR->identity.generate();
-		printf("[ZT_NODE_NEW_DBG] identity.generate done\n");
 		RR->identity.toString(false, RR->publicIdentityStr);
 		RR->identity.toString(true, RR->secretIdentityStr);
 		idtmp[0] = RR->identity.address().toInt();
@@ -140,21 +134,13 @@ Node::Node(void* uptr, void* tptr, const struct ZT_Node_Config* config, const st
 		idtmp[0] = RR->identity.address().toInt();
 		idtmp[1] = 0;
 		n = stateObjectGet(tptr, ZT_STATE_OBJECT_IDENTITY_PUBLIC, idtmp, tmp, sizeof(tmp) - 1);
-		printf("[ZT_NODE_NEW_DBG] id_pub state_get len=%d\n", n);
 		if ((n > 0) && (n < (int)sizeof(RR->publicIdentityStr)) && (n < (int)sizeof(tmp))) {
 			if (memcmp(tmp, RR->publicIdentityStr, n)) {
-				printf("[ZT_NODE_NEW_DBG] id_pub mismatch -> rewriting stored public identity\n");
 				stateObjectPut(tptr, ZT_STATE_OBJECT_IDENTITY_PUBLIC, idtmp, RR->publicIdentityStr, (unsigned int)strlen(RR->publicIdentityStr));
-			} else {
-				printf("[ZT_NODE_NEW_DBG] id_pub matches derived public identity\n");
 			}
-		} else {
-			printf("[ZT_NODE_NEW_DBG] id_pub missing/invalid len=%d\n", n);
 		}
 	}
-	printf("[ZT_NODE_NEW_DBG] ctor identity-load done\n");
 
-	printf("[ZT-NODE] sizeof(Node)=%lu before malloc block\n", (unsigned long)sizeof(Node));
 	char* m = (char*)0;
 	try {
 		const unsigned long ts = sizeof(Trace) + (((sizeof(Trace) & 0xf) != 0) ? (16 - (sizeof(Trace) & 0xf)) : 0);
@@ -164,10 +150,6 @@ Node::Node(void* uptr, void* tptr, const struct ZT_Node_Config* config, const st
 		const unsigned long sas = sizeof(SelfAwareness) + (((sizeof(SelfAwareness) & 0xf) != 0) ? (16 - (sizeof(SelfAwareness) & 0xf)) : 0);
 		const unsigned long bcs = sizeof(Bond) + (((sizeof(Bond) & 0xf) != 0) ? (16 - (sizeof(Bond) & 0xf)) : 0);
 		const unsigned long pms = sizeof(PacketMultiplexer) + (((sizeof(PacketMultiplexer) & 0xf) != 0) ? (16 - (sizeof(PacketMultiplexer) & 0xf)) : 0);
-
-		printf("[ZT-SIZE] Trace=%lu Sw=%lu Mc=%lu Topo=%lu SA=%lu Bond=%lu PM=%lu total=%lu\n",
-			ts, sws, mcs, topologys, sas, bcs, pms,
-			(unsigned long)(16 + ts + sws + mcs + topologys + sas + bcs + pms));
 		m = reinterpret_cast<char*>(::malloc(16 + ts + sws + mcs + topologys + sas + bcs + pms));
 		if (! m) {
 			throw std::bad_alloc();
@@ -1078,7 +1060,9 @@ enum ZT_ResultCode ZT_Node_new(ZT_Node** node, const struct ZT_Node_Config* conf
 	if (!callbacks || !config) {
 		return ZT_RESULT_FATAL_ERROR_INVALID_ARGUMENT;
 	}
+#if defined(ZT_DEBUG_PRINTS) && ZT_DEBUG_PRINTS
 	printf("[ZT-NODE] sizeof(ZeroTier::Node)=%lu\n", (unsigned long)sizeof(ZeroTier::Node));
+#endif
 	try {
 		*node = reinterpret_cast<ZT_Node*>(new ZeroTier::Node(uptr, tptr, config, callbacks, now));
 		return ZT_RESULT_OK;
@@ -1088,12 +1072,16 @@ enum ZT_ResultCode ZT_Node_new(ZT_Node** node, const struct ZT_Node_Config* conf
 		return ZT_RESULT_FATAL_ERROR_OUT_OF_MEMORY;
 	}
 	catch (std::runtime_error& exc) {
+#if defined(ZT_DEBUG_PRINTS) && ZT_DEBUG_PRINTS
 		printf("[ZT_NODE_NEW_DBG] caught std::runtime_error what=%s\n", exc.what());
+#endif
 		zt_dbg_log_exception_trace("std::runtime_error", false, 0, "DATA_STORE_FAILED");
 		return ZT_RESULT_FATAL_ERROR_DATA_STORE_FAILED;
 	}
 	catch (int exc) {
+#if defined(ZT_DEBUG_PRINTS) && ZT_DEBUG_PRINTS
 		printf("[ZT_NODE_NEW_DBG] caught int exception value=%d name=%s\n", exc, zt_node_new_dbg_exception_name((long)exc));
+#endif
 		zt_dbg_log_exception_trace("int", true, (long)exc, zt_node_new_dbg_exception_name((long)exc));
 		return ZT_RESULT_FATAL_ERROR_INTERNAL;
 	}

@@ -1396,30 +1396,30 @@ bool Packet::dearmor(const void* key, const AES aesKeys[2], const Identity& iden
 	const unsigned int cs = cipher();
 	const Address src(source());
 	const Address dst(destination());
-	const bool fromController = (src.toInt() == 0xdb64858fedULL);
+#if defined(ZT_DEBUG_PRINTS) && ZT_DEBUG_PRINTS
 	auto logFail = [&](const char* reason) {
-		if (fromController) {
-			printf("[ZT_DEARMOR] result=fail reason=%s src=0x%llx dst=0x%llx pktId=0x%llx cipher=%u size=%u payloadLen=%u fromController=1\n",
-			       reason,
-			       (unsigned long long)src.toInt(),
-			       (unsigned long long)dst.toInt(),
-			       (unsigned long long)packetId(),
-			       (unsigned int)cs,
-			       (unsigned int)size(),
-			       (unsigned int)((size() > ZT_PACKET_IDX_VERB) ? (size() - ZT_PACKET_IDX_VERB) : 0U));
-		}
+		printf("[ZT_DEARMOR] result=fail reason=%s src=0x%llx dst=0x%llx pktId=0x%llx cipher=%u size=%u payloadLen=%u\n",
+		       reason,
+		       (unsigned long long)src.toInt(),
+		       (unsigned long long)dst.toInt(),
+		       (unsigned long long)packetId(),
+		       (unsigned int)cs,
+		       (unsigned int)size(),
+		       (unsigned int)((size() > ZT_PACKET_IDX_VERB) ? (size() - ZT_PACKET_IDX_VERB) : 0U));
 	};
 	auto logOk = [&]() {
-		if (fromController) {
-			printf("[ZT_DEARMOR] result=ok src=0x%llx dst=0x%llx pktId=0x%llx cipher=%u size=%u payloadLen=%u fromController=1\n",
-			       (unsigned long long)src.toInt(),
-			       (unsigned long long)dst.toInt(),
-			       (unsigned long long)packetId(),
-			       (unsigned int)cs,
-			       (unsigned int)size(),
-			       (unsigned int)((size() > ZT_PACKET_IDX_VERB) ? (size() - ZT_PACKET_IDX_VERB) : 0U));
-		}
+		printf("[ZT_DEARMOR] result=ok src=0x%llx dst=0x%llx pktId=0x%llx cipher=%u size=%u payloadLen=%u\n",
+		       (unsigned long long)src.toInt(),
+		       (unsigned long long)dst.toInt(),
+		       (unsigned long long)packetId(),
+		       (unsigned int)cs,
+		       (unsigned int)size(),
+		       (unsigned int)((size() > ZT_PACKET_IDX_VERB) ? (size() - ZT_PACKET_IDX_VERB) : 0U));
 	};
+#else
+	auto logFail = [](const char*) {};
+	auto logOk = []() {};
+#endif
 
 	if (extendedArmor() && (cs == ZT_PROTO_CIPHER_SUITE__C25519_POLY1305_NONE)) {
 		if (size() < (ZT_PACKET_IDX_VERB + 1 + ZT_ECC_EPHEMERAL_PUBLIC_KEY_LEN)) {
