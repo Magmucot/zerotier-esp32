@@ -7,6 +7,8 @@ namespace ZeroTier {
 
 unsigned int OSUtils::ztsnprintf(char* buf, unsigned int len, const char* fmt, ...)
 {
+    if (!buf || len == 0)
+        return 0;
     va_list ap;
     va_start(ap, fmt);
     int r = vsnprintf(buf, len, fmt, ap);

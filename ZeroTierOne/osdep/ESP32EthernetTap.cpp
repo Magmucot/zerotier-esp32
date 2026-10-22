@@ -58,6 +58,7 @@ ESP32EthernetTap::~ESP32EthernetTap()
 	ESP32LwIPGlue::setUp(&_netif, false);
 	ESP32LwIPGlue::removeNetif(&_netif);
 #endif
+	ESP32NetLink::getInstance().setZeroTierNetif(nullptr, nullptr);
 }
 
 void ESP32EthernetTap::setEnabled(bool en)

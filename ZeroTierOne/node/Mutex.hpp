@@ -21,10 +21,10 @@ namespace ZeroTier {
 class Mutex {
   public:
 	Mutex()  { _mh = xSemaphoreCreateMutex(); }
-	~Mutex() { vSemaphoreDelete(_mh); }
+	~Mutex() { if (_mh) vSemaphoreDelete(_mh); }
 
-	inline void lock()   const { xSemaphoreTake(const_cast<Mutex*>(this)->_mh, portMAX_DELAY); }
-	inline void unlock() const { xSemaphoreGive(const_cast<Mutex*>(this)->_mh); }
+	inline void lock()   const { if (_mh) xSemaphoreTake(const_cast<Mutex*>(this)->_mh, portMAX_DELAY); }
+	inline void unlock() const { if (_mh) xSemaphoreGive(const_cast<Mutex*>(this)->_mh); }
 
 	class Lock {
 	  public:
