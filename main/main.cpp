@@ -38,11 +38,12 @@ static void zt_event(ZT_Node *node, void *uptr, void *tptr,
 
 static void zt_main_task(void *arg)
 {
-    // Initialize NVS
+    // Initialize NVS without erasing provisioned identity on error
     esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS flash init failed (%s), not erasing to preserve identity", esp_err_to_name(err));
+        vTaskDelete(nullptr);
+        return;
     }
 
     // Measure DIRAM before ZT_Node_new

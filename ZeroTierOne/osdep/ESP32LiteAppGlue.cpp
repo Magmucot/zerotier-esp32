@@ -18,15 +18,6 @@ extern "C" int zt_esp32_lite_nvs_init(void)
 {
 #ifdef ESP_PLATFORM
 	esp_err_t err = nvs_flash_init();
-	if ((err == ESP_ERR_NVS_NO_FREE_PAGES) || (err == ESP_ERR_NVS_NEW_VERSION_FOUND)) {
-		/* This helper is intentionally conservative: only erase if NVS is unusable.
-		 * Production apps may want to handle this outside the ZeroTier component. */
-		err = nvs_flash_erase();
-		if (err != ESP_OK) {
-			return -1;
-		}
-		err = nvs_flash_init();
-	}
 	return (err == ESP_OK) ? 0 : -1;
 #else
 	return -1;
