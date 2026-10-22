@@ -1,125 +1,149 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_timer.h"
+#include "freertos/event_groups.h"
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "nvs_flash.h"
-#include "ZeroTierOne.h"
-#include "ESP32NetLink.hpp"
+
+#include "ESP32LiteAppGlue.hpp"
 
 static const char *TAG = "zt_main";
 
-// Declarations from port files
-extern "C" int  zt_state_get_impl(ZT_Node*, void*, void*, enum ZT_StateObjectType, const uint64_t*, void*, unsigned int);
-extern "C" void zt_state_put_impl(ZT_Node*, void*, void*, enum ZT_StateObjectType, const uint64_t*, const void*, int);
-extern "C" int  zt_wire_send_impl(ZT_Node*, void*, void*, int64_t, const struct sockaddr_storage*, const void*, unsigned int, unsigned int);
-extern "C" void zt_virtual_frame_impl(ZT_Node*, void*, void*, uint64_t, void**, uint64_t, uint64_t, unsigned int, unsigned int, const void*, unsigned int);
-extern "C" int  zt_virtual_config_impl(ZT_Node*, void*, void*, uint64_t, void**, enum ZT_VirtualNetworkConfigOperation, const ZT_VirtualNetworkConfig*);
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
 
-extern "C" int  zt_socket_init(void);
-extern "C" void zt_socket_start_recv(ZT_Node *node, void *uptr);
+static EventGroupHandle_t s_wifi_event_group = nullptr;
+static int s_retry_num = 0;
+static const int MAXIMUM_RETRY = 5;
 
-static int zt_path_check(ZT_Node *node, void *uptr, void *tptr,
-    uint64_t ztaddr, int64_t localSocket,
-    const struct sockaddr_storage *addr)
+#ifndef CONFIG_ESP_WIFI_SSID
+#define CONFIG_ESP_WIFI_SSID "myssid"
+#endif
+
+#ifndef CONFIG_ESP_WIFI_PASSWORD
+#define CONFIG_ESP_WIFI_PASSWORD "mypassword"
+#endif
+
+#ifndef CONFIG_ZT_NETWORK_ID
+#define CONFIG_ZT_NETWORK_ID "0xdb64858fed0b2566"
+#endif
+
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                               int32_t event_id, void* event_data)
 {
-    (void)node; (void)uptr; (void)tptr; (void)ztaddr; (void)localSocket;
-    if (addr && (addr->ss_family == AF_INET)) {
-        const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
-        ZeroTier::ESP32NetLink::LookupResult lr = ZeroTier::ESP32NetLink::getInstance().lookupIpv4(sin->sin_addr.s_addr);
-        if (lr.matched && lr.supported) {
-            ESP_LOGW(TAG, "zt_path_check reject reason=zt_over_zt");
-            return 0;
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry_num < MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG, "retry connecting to AP");
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         }
-    }
-    return 1;
-}
-
-static int zt_path_lookup(ZT_Node *node, void *uptr, void *tptr,
-    uint64_t ztaddr, int family,
-    struct sockaddr_storage *result) { return 0; }
-
-static void zt_event(ZT_Node *node, void *uptr, void *tptr,
-    enum ZT_Event event, const void *data)
-{
-    ESP_LOGI(TAG, "ZT event: %d", (int)event);
-    if (event == ZT_EVENT_ONLINE) {
-        ESP_LOGI(TAG, "ZeroTier node är online!");
+        ESP_LOGI(TAG, "connect to AP failed");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "got ip: " IPSTR, IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
 
-static void zt_main_task(void *arg)
+static esp_err_t wifi_init_sta(void)
 {
-    // Initialize NVS without erasing provisioned identity on error
-    esp_err_t err = nvs_flash_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS flash init failed (%s), not erasing to preserve identity", esp_err_to_name(err));
-        vTaskDelete(nullptr);
-        return;
+    s_wifi_event_group = xEventGroupCreate();
+    if (!s_wifi_event_group) {
+        return ESP_ERR_NO_MEM;
     }
 
-    // Measure DIRAM before ZT_Node_new
-    size_t diram_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    size_t psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    ESP_LOGI(TAG, "DIRAM ledigt före ZT_Node_new: %u bytes", (unsigned)diram_before);
-    ESP_LOGI(TAG, "PSRAM ledigt före ZT_Node_new: %u bytes", (unsigned)psram_before);
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
 
-    // Initialize UDP socket
-    if (zt_socket_init() != 0) {
-        ESP_LOGE(TAG, "zt_socket_init misslyckades");
-        vTaskDelete(nullptr);
-        return;
-    }
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // Set up callbacks
-    ZT_Node_Callbacks cb;
-    memset(&cb, 0, sizeof(cb));
-    cb.version                      = 0;
-    cb.statePutFunction             = zt_state_put_impl;
-    cb.stateGetFunction             = zt_state_get_impl;
-    cb.wirePacketSendFunction       = zt_wire_send_impl;
-    cb.virtualNetworkFrameFunction  = zt_virtual_frame_impl;
-    cb.virtualNetworkConfigFunction = zt_virtual_config_impl;
-    cb.eventCallback                = zt_event;
-    cb.pathCheckFunction            = zt_path_check;
-    cb.pathLookupFunction           = zt_path_lookup;
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_got_ip));
 
-    // Create ZeroTier node
-    ZT_Node *node = nullptr;
-    struct ZT_Node_Config cfg = { 0, 0 };
-    int64_t now = (int64_t)(esp_timer_get_time() / 1000ULL);
-    ZT_ResultCode rc = ZT_Node_new(&node, &cfg, nullptr, nullptr, &cb, now);
+    wifi_config_t wifi_config;
+    memset(&wifi_config, 0, sizeof(wifi_config));
+    strncpy((char*)wifi_config.sta.ssid, CONFIG_ESP_WIFI_SSID, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char*)wifi_config.sta.password, CONFIG_ESP_WIFI_PASSWORD, sizeof(wifi_config.sta.password) - 1);
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
-    size_t diram_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    size_t psram_after = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    ESP_LOGI(TAG, "ZT_Node_new rc=%d node=%p", (int)rc, (void*)node);
-    ESP_LOGI(TAG, "DIRAM förbrukat av ZT_Node_new: %d bytes", (int)(diram_before - diram_after));
-    ESP_LOGI(TAG, "PSRAM förbrukat av ZT_Node_new: %d bytes", (int)(psram_before - psram_after));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
 
-    if (rc != ZT_RESULT_OK || !node) {
-        ESP_LOGE(TAG, "ZT_Node_new misslyckades");
-        vTaskDelete(nullptr);
-        return;
-    }
+    ESP_LOGI(TAG, "wifi_init_sta finished, waiting for connection...");
 
-    // Start receive task
-    zt_socket_start_recv(node, nullptr);
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+            pdFALSE,
+            pdFALSE,
+            pdMS_TO_TICKS(15000));
 
-    // Main loop: run ZT_Node_processBackgroundTasks every 100ms
-    while (1) {
-        now = (int64_t)(esp_timer_get_time() / 1000ULL);
-        int64_t next_run = now + 100;
-        ZT_Node_processBackgroundTasks(node, nullptr, now, &next_run);
-        int64_t delay_ms = next_run - (int64_t)(esp_timer_get_time() / 1000ULL);
-        if (delay_ms < 1) delay_ms = 1;
-        if (delay_ms > 100) delay_ms = 100;
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "connected to ap SSID: %s", CONFIG_ESP_WIFI_SSID);
+        return ESP_OK;
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGW(TAG, "Failed to connect to SSID: %s", CONFIG_ESP_WIFI_SSID);
+        return ESP_FAIL;
+    } else {
+        ESP_LOGW(TAG, "Timeout connecting to Wi-Fi AP");
+        return ESP_ERR_TIMEOUT;
     }
 }
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "ZeroTier ESP32-port - fas 2");
-    xTaskCreate(zt_main_task, "zt_main", 8192, nullptr, 5, nullptr);
+    ESP_LOGI(TAG, "Starting ZeroTier ESP32-Lite Node");
+
+    ESP_LOGI(TAG, "Initializing NVS");
+    if (zt_esp32_lite_nvs_init() != 0) {
+        ESP_LOGE(TAG, "NVS initialization failed");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Initializing Wi-Fi Station");
+    esp_err_t wifi_ret = wifi_init_sta();
+    if (wifi_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Underlay Wi-Fi not connected yet, proceeding with startup");
+    }
+
+    uint64_t nwid = 0;
+#ifdef CONFIG_ZT_NETWORK_ID
+    nwid = strtoull(CONFIG_ZT_NETWORK_ID, NULL, 16);
+#endif
+    if (nwid == 0) {
+        nwid = 0xdb64858fed0b2566ULL;
+    }
+
+    ESP_LOGI(TAG, "Starting ZeroTier Lite port for network 0x%016llx", (unsigned long long)nwid);
+    int rc = zt_esp32_lite_start_with_namespace(nwid, "zerotier");
+    ESP_LOGI(TAG, "ZeroTier Lite started rc=%d node_id=%010llx identity_ready=%d",
+             rc, (unsigned long long)zt_esp32_lite_node_id(), zt_esp32_lite_identity_ready());
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(30000));
+        zt_esp32_lite_dump_diagnostics();
+    }
 }
