@@ -496,7 +496,9 @@ bool NetworkConfig::fromDictionary(const Dictionary<ZT_NETWORKCONFIG_DICT_CAPACI
 					while (p < tmp->size()) {
 						Capability cap;
 						p += cap.deserialize(*tmp, p);
-						this->capabilities[this->capabilityCount++] = cap;
+						if (this->capabilityCount < ZT_MAX_NETWORK_CAPABILITIES) {
+							this->capabilities[this->capabilityCount++] = cap;
+						}
 					}
 				}
 				catch (...) {
@@ -510,7 +512,9 @@ bool NetworkConfig::fromDictionary(const Dictionary<ZT_NETWORKCONFIG_DICT_CAPACI
 					while (p < tmp->size()) {
 						Tag tag;
 						p += tag.deserialize(*tmp, p);
-						this->tags[this->tagCount++] = tag;
+						if (this->tagCount < ZT_MAX_NETWORK_TAGS) {
+							this->tags[this->tagCount++] = tag;
+						}
 					}
 				}
 				catch (...) {
