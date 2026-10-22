@@ -10,7 +10,11 @@ static const char *TAG = "zt_storage";
 static const char *NVS_NS = "zerotier";
 
 static void make_key(enum ZT_StateObjectType type, const uint64_t id[2], char *out, size_t len) {
-    snprintf(out, len, "zt%d_%08x", (int)type, (unsigned)(id ? id[0] : 0));
+    uint32_t h = 0;
+    if (id) {
+        h = (uint32_t)((id[0] & 0xffffffffULL) ^ (id[0] >> 32) ^ (id[1] & 0xffffffffULL) ^ (id[1] >> 32));
+    }
+    snprintf(out, len, "z%d_%08x", (int)type, (unsigned int)h);
 }
 
 extern "C" void zt_state_put_impl(ZT_Node *node, void *uptr, void *tptr,
