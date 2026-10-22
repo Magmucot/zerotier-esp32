@@ -92,6 +92,14 @@ bool ESP32EthernetTap::addIp(const InetAddress& ip)
 		if (_ipActive[i]) {
 			++count;
 			if (_ips[i].ipsEqual(ip)) {
+				if (_ips[i].netmaskBits() != ip.netmaskBits()) {
+					_ips[i] = ip;
+#ifdef ESP_PLATFORM
+					if (ip.isV4()) {
+						_applyPrimaryIpv4Locked();
+					}
+#endif
+				}
 				return true;
 			}
 		}

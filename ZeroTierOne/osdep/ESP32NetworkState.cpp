@@ -149,48 +149,78 @@ bool ESP32NetworkState::_managedIpExists(const InetAddress& ip) const
 
 void ESP32NetworkState::_syncIps(const ZT_VirtualNetworkConfig& config)
 {
-	bool stillPresent[ZT_ESP32_MAX_MANAGED_IPS];
-	memset(stillPresent, 0, sizeof(stillPresent));
+	if (! _tap) {
+		return;
+	}
 
-	for (unsigned int c = 0; c < config.assignedAddressCount; ++c) {
-		InetAddress ip(config.assignedAddresses[c]);
-		if (! ip.isV4()) {
+	const unsigned int assignedCount = (config.assignedAddressCount < ZT_MAX_ZT_ASSIGNED_ADDRESSES) ?
+		config.assignedAddressCount : ZT_MAX_ZT_ASSIGNED_ADDRESSES;
+	bool desiredHandled[ZT_MAX_ZT_ASSIGNED_ADDRESSES];
+	memset(desiredHandled, 0, sizeof(desiredHandled));
+
+	// Phase 1: Reconcile existing active IPs. Update changed masks; remove deleted IPs.
+	for (unsigned int i = 0; i < ZT_ESP32_MAX_MANAGED_IPS; ++i) {
+		if (! _managedIpActive[i]) {
 			continue;
 		}
-		bool found = false;
-		for (unsigned int i = 0; i < ZT_ESP32_MAX_MANAGED_IPS; ++i) {
-			if (_managedIpActive[i] && _managedIps[i].ipsEqual(ip)) {
-				stillPresent[i] = true;
-				found = true;
+		bool stillPresent = false;
+		for (unsigned int c = 0; c < assignedCount; ++c) {
+			const InetAddress ip(config.assignedAddresses[c]);
+			if (! ip.isV4()) {
+				continue;
+			}
+			if (_managedIps[i].ipsEqual(ip)) {
+				stillPresent = true;
+				desiredHandled[c] = true;
+				if (_managedIps[i].netmaskBits() != ip.netmaskBits()) {
+					char bufOld[64], bufNew[64];
+					fprintf(stderr, "[ZT_ESP32_NETSTATE] managed IP netmask update old=%s new=%s\n",
+						_managedIps[i].toString(bufOld), ip.toString(bufNew));
+					_managedIps[i] = ip;
+					if (! _tap->addIp(ip)) {
+						fprintf(stderr, "[ZT_ESP32_NETSTATE] managed IP tap add failed on netmask update ip=%s\n", ip.toString(bufNew));
+					}
+				}
 				break;
 			}
 		}
-		if (found) {
+		if (! stillPresent) {
+			char buf[64];
+			fprintf(stderr, "[ZT_ESP32_NETSTATE] managed IP remove ip=%s\n", _managedIps[i].toString(buf));
+			_tap->removeIp(_managedIps[i]);
+			_managedIpActive[i] = false;
+		}
+	}
+
+	// Phase 2: Add newly assigned IPs into freed slots.
+	for (unsigned int c = 0; c < assignedCount; ++c) {
+		if (desiredHandled[c]) {
+			continue;
+		}
+		const InetAddress ip(config.assignedAddresses[c]);
+		if (! ip.isV4()) {
 			continue;
 		}
 		unsigned int slot = ZT_ESP32_MAX_MANAGED_IPS;
 		for (unsigned int i = 0; i < ZT_ESP32_MAX_MANAGED_IPS; ++i) {
-			if (! _managedIpActive[i]) { slot = i; break; }
+			if (! _managedIpActive[i]) {
+				slot = i;
+				break;
+			}
 		}
 		if (slot == ZT_ESP32_MAX_MANAGED_IPS) {
 			char buf[64];
 			fprintf(stderr, "[ZT_ESP32_NETSTATE] managed IP drop reason=table_full ip=%s\n", ip.toString(buf));
 			continue;
 		}
-		_managedIps[slot] = ip;
-		_managedIpActive[slot] = true;
-		stillPresent[slot] = true;
-		_tap->addIp(ip);
-		char buf[64];
-		fprintf(stderr, "[ZT_ESP32_NETSTATE] managed IP add ip=%s\n", ip.toString(buf));
-	}
-
-	for (unsigned int i = 0; i < ZT_ESP32_MAX_MANAGED_IPS; ++i) {
-		if (_managedIpActive[i] && (! stillPresent[i])) {
+		if (_tap->addIp(ip)) {
+			_managedIps[slot] = ip;
+			_managedIpActive[slot] = true;
 			char buf[64];
-			fprintf(stderr, "[ZT_ESP32_NETSTATE] managed IP remove ip=%s\n", _managedIps[i].toString(buf));
-			_tap->removeIp(_managedIps[i]);
-			_managedIpActive[i] = false;
+			fprintf(stderr, "[ZT_ESP32_NETSTATE] managed IP add ip=%s\n", ip.toString(buf));
+		} else {
+			char buf[64];
+			fprintf(stderr, "[ZT_ESP32_NETSTATE] managed IP tap add failed ip=%s\n", ip.toString(buf));
 		}
 	}
 }
