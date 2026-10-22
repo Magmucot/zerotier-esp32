@@ -64,8 +64,8 @@ function(zt_esp32_lite_configure_component target_name)
             target_compile_definitions(${_zt_lwip_lib} PUBLIC
                 ESP_IDF_LWIP_HOOK_FILENAME=\"osdep/ESP32LwIPHooks.h\")
             target_include_directories(${_zt_lwip_lib} PUBLIC
-                /project/ZeroTierOne
-                /project/ZeroTierOne/osdep)
+                ${CMAKE_CURRENT_LIST_DIR}/..
+                ${CMAKE_CURRENT_LIST_DIR})
         endif()
     endif()
 endfunction()

@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
-file(GLOB ZT_ALL_SRCS /project/ZeroTierOne/node/*.cpp)
+get_filename_component(ZT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../ZeroTierOne" ABSOLUTE)
+
+file(GLOB ZT_ALL_SRCS ${ZT_ROOT}/node/*.cpp)
 list(FILTER ZT_ALL_SRCS EXCLUDE REGEX ".*(AES_aesni|AES_armcrypto|Bond|Metrics|Trace)\.cpp$")
 list(APPEND ZT_ALL_SRCS
     ${CMAKE_CURRENT_SOURCE_DIR}/port/zt_mutex.cpp
@@ -16,12 +18,12 @@ list(APPEND ZT_ALL_SRCS
 )
 
 # ESP32-Lite ZeroTier port draft sources.
-# The helper file's source list is relative to /project/ZeroTierOne, so prefix it
+# The helper file's source list is relative to ZeroTierOne, so prefix it
 # before passing it to idf_component_register from this component directory.
-include(/project/ZeroTierOne/osdep/ESP32LitePort.cmake)
+include(${ZT_ROOT}/osdep/ESP32LitePort.cmake)
 set(ZT_ESP32_LITE_PORT_SRCS_ABS)
 foreach(_zt_lite_src ${ZT_ESP32_LITE_PORT_SRCS})
-    list(APPEND ZT_ESP32_LITE_PORT_SRCS_ABS /project/ZeroTierOne/${_zt_lite_src})
+    list(APPEND ZT_ESP32_LITE_PORT_SRCS_ABS ${ZT_ROOT}/${_zt_lite_src})
 endforeach()
 list(APPEND ZT_ALL_SRCS ${ZT_ESP32_LITE_PORT_SRCS_ABS})
 
@@ -29,12 +31,12 @@ list(APPEND ZT_ALL_SRCS ${ZT_ESP32_LITE_PORT_SRCS_ABS})
 idf_component_register(
     SRCS ${ZT_ALL_SRCS}
     INCLUDE_DIRS
-        /project/ZeroTierOne/node
-        /project/ZeroTierOne/osdep
-        /project/ZeroTierOne/service
+        ${ZT_ROOT}/node
+        ${ZT_ROOT}/osdep
+        ${ZT_ROOT}/service
         port
         port/stubs
-        /project/ZeroTierOne/include
+        ${ZT_ROOT}/include
         include
     REQUIRES
         freertos
@@ -99,10 +101,4 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 target_link_libraries(${COMPONENT_LIB} INTERFACE
     "-Wl,--undefined=zt_debug_dumpManagedRouteDecision_ipv4"
     "-Wl,--undefined=zt_debug_enableEgressTrace_ipv4"
-    "-Wl,--undefined=zt_debug_trigger_arp_request_ipv4"
-    "-Wl,--undefined=zt_debug_trigger_icmp_echo_ipv4"
-    "-Wl,--undefined=zt_debug_schedule_icmp_ping_ipv4"
-    "-Wl,--undefined=zt_debug_schedule_udp_payload_ipv4"
-    "-Wl,--undefined=zt_debug_schedule_underlay_icmp_ping_ipv4"
-    "-Wl,--undefined=zt_debug_schedule_overlay_icmp_ping_ipv4"
 )
