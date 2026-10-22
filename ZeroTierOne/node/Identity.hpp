@@ -46,7 +46,7 @@ class Identity {
 	Identity(const char* str) : _privateKey((ECC::Private*)0)
 	{
 		if (! fromString(str)) {
-			abort();
+			throw ZT_EXCEPTION_INVALID_SERIALIZED_DATA_INVALID_TYPE;
 		}
 	}
 
@@ -140,7 +140,7 @@ class Identity {
 		if (_privateKey) {
 			return ECC::sign(*_privateKey, _publicKey, data, len);
 		}
-		abort();
+		throw ZT_EXCEPTION_PRIVATE_KEY_REQUIRED;
 	}
 
 	/**
@@ -243,7 +243,7 @@ class Identity {
 		p += ZT_ADDRESS_LENGTH;
 
 		if (b[p++] != 0) {
-			abort();
+			throw ZT_EXCEPTION_INVALID_SERIALIZED_DATA_INVALID_TYPE;
 		}
 
 		memcpy(_publicKey.data, b.field(p, ZT_ECC_PUBLIC_KEY_SET_LEN), ZT_ECC_PUBLIC_KEY_SET_LEN);
@@ -252,7 +252,7 @@ class Identity {
 		unsigned int privateKeyLength = (unsigned int)b[p++];
 		if (privateKeyLength) {
 			if (privateKeyLength != ZT_ECC_PRIVATE_KEY_SET_LEN) {
-				abort();
+				throw ZT_EXCEPTION_INVALID_SERIALIZED_DATA_INVALID_CRYPTOGRAPHIC_TOKEN;
 			}
 			_privateKey = new ECC::Private();
 			memcpy(_privateKey->data, b.field(p, ZT_ECC_PRIVATE_KEY_SET_LEN), ZT_ECC_PRIVATE_KEY_SET_LEN);
