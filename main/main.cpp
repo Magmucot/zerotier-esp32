@@ -12,6 +12,7 @@
 #include "nvs_flash.h"
 
 #include "ESP32LiteAppGlue.hpp"
+#include "web_server.hpp"
 
 static const char *TAG = "zt_main";
 
@@ -20,19 +21,27 @@ static const char *TAG = "zt_main";
 
 static EventGroupHandle_t s_wifi_event_group = nullptr;
 static int s_retry_num = 0;
-static const int MAXIMUM_RETRY = 5;
-
 #ifndef CONFIG_ESP_WIFI_SSID
-#define CONFIG_ESP_WIFI_SSID "myssid"
+#define CONFIG_ESP_WIFI_SSID ""
 #endif
 
 #ifndef CONFIG_ESP_WIFI_PASSWORD
-#define CONFIG_ESP_WIFI_PASSWORD "mypassword"
+#define CONFIG_ESP_WIFI_PASSWORD ""
+#endif
+
+#ifndef CONFIG_ESP_MAXIMUM_RETRY
+#define CONFIG_ESP_MAXIMUM_RETRY 10
 #endif
 
 #ifndef CONFIG_ZT_NETWORK_ID
-#define CONFIG_ZT_NETWORK_ID "0xdb64858fed0b2566"
+#define CONFIG_ZT_NETWORK_ID ""
 #endif
+
+#ifndef CONFIG_PING_TARGET_IP
+#define CONFIG_PING_TARGET_IP "1.1.1.1"
+#endif
+
+static const int MAXIMUM_RETRY = CONFIG_ESP_MAXIMUM_RETRY;
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data)
@@ -58,6 +67,11 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
 static esp_err_t wifi_init_sta(void)
 {
+    if (strlen(CONFIG_ESP_WIFI_SSID) == 0) {
+        ESP_LOGW(TAG, "Wi-Fi SSID is not configured. Please configure via 'idf.py menuconfig' -> 'ZeroTier ESP32 Application Configuration'");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     s_wifi_event_group = xEventGroupCreate();
     if (!s_wifi_event_group) {
         return ESP_ERR_NO_MEM;
@@ -87,7 +101,7 @@ static esp_err_t wifi_init_sta(void)
     memset(&wifi_config, 0, sizeof(wifi_config));
     strncpy((char*)wifi_config.sta.ssid, CONFIG_ESP_WIFI_SSID, sizeof(wifi_config.sta.ssid) - 1);
     strncpy((char*)wifi_config.sta.password, CONFIG_ESP_WIFI_PASSWORD, sizeof(wifi_config.sta.password) - 1);
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.threshold.authmode = (strlen(CONFIG_ESP_WIFI_PASSWORD) == 0) ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
@@ -123,18 +137,29 @@ extern "C" void app_main(void)
         return;
     }
 
+    ESP_LOGI(TAG, "Initializing Internal Temperature Sensor");
+    telemetry_temp_sensor_init();
+
+    ESP_LOGI(TAG, "Initializing Asynchronous Ping Service (target: %s)", CONFIG_PING_TARGET_IP);
+    ping_service_init(CONFIG_PING_TARGET_IP);
+
     ESP_LOGI(TAG, "Initializing Wi-Fi Station");
     esp_err_t wifi_ret = wifi_init_sta();
     if (wifi_ret != ESP_OK) {
         ESP_LOGW(TAG, "Underlay Wi-Fi not connected yet, proceeding with startup");
     }
 
+    ESP_LOGI(TAG, "Starting Dual-Interface Web Server");
+    web_server_start();
+
     uint64_t nwid = 0;
 #ifdef CONFIG_ZT_NETWORK_ID
-    nwid = strtoull(CONFIG_ZT_NETWORK_ID, NULL, 16);
+    if (strlen(CONFIG_ZT_NETWORK_ID) > 0) {
+        nwid = strtoull(CONFIG_ZT_NETWORK_ID, NULL, 16);
+    }
 #endif
     if (nwid == 0) {
-        nwid = 0xdb64858fed0b2566ULL;
+        ESP_LOGW(TAG, "ZeroTier Network ID is unconfigured (0x0). Configure via 'idf.py menuconfig' -> 'ZeroTier ESP32 Application Configuration'");
     }
 
     ESP_LOGI(TAG, "Starting ZeroTier Lite port for network 0x%016llx", (unsigned long long)nwid);

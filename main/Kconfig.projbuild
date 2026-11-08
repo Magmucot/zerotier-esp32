@@ -1,0 +1,37 @@
+menu "ZeroTier ESP32 Application Configuration"
+
+    config ESP_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+        help
+            SSID of the Wi-Fi network for ESP32 station mode to connect to.
+            Can be left empty if unconfigured or provisioned at runtime.
+
+    config ESP_WIFI_PASSWORD
+        string "Wi-Fi Password"
+        default ""
+        help
+            Wi-Fi password (WPA/WPA2/WPA3) for station mode.
+            Can be left empty for open networks or if unconfigured.
+
+    config ESP_MAXIMUM_RETRY
+        int "Maximum Wi-Fi Connection Retries"
+        default 10
+        range 1 50
+        help
+            Maximum retry attempts for Wi-Fi connection before reporting failure.
+
+    config ZT_NETWORK_ID
+        string "ZeroTier Network ID (16-char hex, e.g. 0x...)"
+        default ""
+        help
+            16-digit hexadecimal ZeroTier network ID (e.g. 0x0123456789abcdef).
+            If left empty, the ZeroTier node will initialize without auto-joining a network.
+
+    config PING_TARGET_IP
+        string "Ping Target IP Address"
+        default "1.1.1.1"
+        help
+            Target IPv4 address for background network latency measurement.
+
+endmenu

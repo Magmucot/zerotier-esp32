@@ -1054,11 +1054,11 @@ static void zt_dbg_log_fatal_trace(const char* reason)
 enum ZT_ResultCode ZT_Node_new(ZT_Node** node, const struct ZT_Node_Config* config, void* uptr, void* tptr, const struct ZT_Node_Callbacks* callbacks, int64_t now)
 {
 	if (!node) {
-		return ZT_RESULT_FATAL_ERROR_INVALID_ARGUMENT;
+		return ZT_RESULT_FATAL_ERROR_INTERNAL;
 	}
 	*node = (ZT_Node*)0;
 	if (!callbacks || !config) {
-		return ZT_RESULT_FATAL_ERROR_INVALID_ARGUMENT;
+		return ZT_RESULT_FATAL_ERROR_INTERNAL;
 	}
 #if defined(ZT_DEBUG_PRINTS) && ZT_DEBUG_PRINTS
 	printf("[ZT-NODE] sizeof(ZeroTier::Node)=%lu\n", (unsigned long)sizeof(ZeroTier::Node));

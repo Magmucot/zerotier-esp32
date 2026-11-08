@@ -37,7 +37,7 @@ static void _addr_to_str(const struct sockaddr_storage *ss, char *out, size_t ou
     }
 }
 
-extern "C" void zt_debug_dumpManagedRouteDecision_ipv4(uint64_t nwid, uint32_t ip_be, uint32_t marker_id)
+extern "C" __attribute__((weak)) void zt_debug_dumpManagedRouteDecision_ipv4(uint64_t nwid, uint32_t ip_be, uint32_t marker_id)
 {
     ZT_Node *node = s_debug_node;
     if (!node) {
@@ -504,7 +504,7 @@ extern "C" void zt_debug_egress_print_result(uint64_t nwid, const uint8_t *frame
 // ── GDB-callable: enable egress trace ────────────────────────────────────────
 // ip_le convention: ((uint32_t)172)|((uint32_t)25<<8)|((uint32_t)206<<16)|((uint32_t)161<<24)
 // = 0xa1ce19ac for 172.25.206.161
-extern "C" void zt_debug_enableEgressTrace_ipv4(uint64_t nwid, uint32_t ip_le,
+extern "C" __attribute__((weak)) void zt_debug_enableEgressTrace_ipv4(uint64_t nwid, uint32_t ip_le,
                                                   uint32_t marker_id, uint32_t seconds)
 {
     s_egress.nwid         = nwid;

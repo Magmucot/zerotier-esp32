@@ -36,6 +36,23 @@ ZeroTierOne/zerotier_dump.txt
 components/zerotier_node/CMakeLists.txt.bak-*
 AGENTS.md
 
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
 # Agent team directories
 .agents/
 ORIGINAL_REQUEST.md
+
+# ESP-IDF local sdkconfig files containing secrets
+sdkconfig
+sdkconfig.old
+sdkconfig.*
+!sdkconfig.defaults
+!sdkconfig.defaults.*
+.env*
+*.pem
+*.key
+
